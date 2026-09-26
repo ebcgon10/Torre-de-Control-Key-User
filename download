@@ -1,7 +1,0 @@
-# Nunca subir datos operacionales ni credenciales al repositorio
-*.csv
-*.xlsx
-*.xls
-*.parquet
-.streamlit/secrets.toml
-__pycache__/

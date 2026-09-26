@@ -306,5 +306,5 @@ with tab_calidad:
     n_sol = int(brechas["solapada"].sum())
     if n_sol:
         st.warning(f"{n_sol} veces un operario inició una lista antes de terminar la anterior. "
-                   "Se contaron como 0 minutos entre listas."
+                   "Se contaron como 0 minutos entre listas.")
                    

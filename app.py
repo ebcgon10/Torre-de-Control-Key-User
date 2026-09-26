@@ -63,8 +63,15 @@ if arch_grua:
 fechas = sorted(listas["fecha_op"].dt.date.unique())
 with st.sidebar:
     st.header("Filtros")
-    rango = st.date_input("Fecha operativa", value=(fechas[-1], fechas[-1]),
-                          min_value=fechas[0], max_value=fechas[-1])
+    modo = st.radio("Período", ["Un día", "Rango de fechas"], horizontal=True)
+    if modo == "Un día":
+        dia = st.selectbox("Fecha operativa", fechas[::-1],
+                           format_func=lambda f: f.strftime("%d/%m/%Y"))
+        rango = (dia, dia)
+    else:
+        rango = st.date_input("Fecha operativa", value=(fechas[0], fechas[-1]),
+                              min_value=fechas[0], max_value=fechas[-1],
+                              format="DD/MM/YYYY")
     turnos_sel = st.multiselect("Turno", sorted(listas["turno"].unique()),
                                 default=sorted(listas["turno"].unique()))
     zonas_sel = st.multiselect("Zona de trabajo", sorted(listas["zona"].unique()),
@@ -299,4 +306,4 @@ with tab_calidad:
     n_sol = int(brechas["solapada"].sum())
     if n_sol:
         st.warning(f"{n_sol} veces un operario inició una lista antes de terminar la anterior. "
-                   "Se contaron como 0 minutos entre listas.")
+                   "Se contaron como 0 minutos entre listas.")inutos entre listas.")

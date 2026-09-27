@@ -22,7 +22,7 @@ def cargar_picking(contenidos: tuple):
     df = pd.concat([proc.leer_csv(c) for c in contenidos], ignore_index=True)
     listas, exclusiones, avisos = proc.preparar_picking(df)
     brechas = proc.calcular_brechas(listas)
-    return listas, brechas, exclusiones, avisos
+    return listas, brechas, exclusiones, avisos, proc.preparar_lpns(df)
 
 
 @st.cache_data(show_spinner="Procesando movimientos de grúa...")
@@ -48,7 +48,7 @@ def cliente_drive(credenciales_json):
 @st.cache_data(ttl=3600, show_spinner="Buscando archivos en Drive...")
 def listar_drive(credenciales_json, carpeta_id):
     import drive
-    return drive.listar_csv(cliente_drive(credenciales_json), carpeta_id)
+    return drive.listar_archivos(cliente_drive(credenciales_json), carpeta_id)
 
 
 @st.cache_data(show_spinner=False, max_entries=200)
@@ -58,8 +58,23 @@ def bajar_drive(credenciales_json, archivo_id, modificado):
     return drive.descargar(cliente_drive(credenciales_json), archivo_id)
 
 
+@st.cache_data(show_spinner="Analizando posiciones de picking...")
+def cargar_posiciones(ventas: tuple, maestro: bytes, factor: tuple | None):
+    import posiciones as pos
+    v = pd.concat([pos.leer_tabla(b, n, columnas=pos.COLS_VENTA) for b, n in ventas], ignore_index=True)
+    v = pos.preparar_venta(v.drop_duplicates(subset=["documento material", "material"]))
+    f = pos.leer_factor_pallet(*factor) if factor else None
+    r, dias = pos.analizar(v, pos.leer_maestro(maestro), f)
+    esperado = pos.pallet_esperado(v, f) if f is not None else None
+    return r, pos.resumen_zonas(r), dias.min(), dias.max(), len(dias), esperado
+
+
+def nombre_norm(nombre):
+    return nombre.upper().replace("_", " ")
+
+
 conf_drive = secretos_drive()
-contenidos_pick, contenidos_grua = (), ()
+contenidos_pick, contenidos_grua, contenidos_venta, contenido_maestro, factor_pallet = (), (), (), None, None
 
 with st.sidebar:
     st.header("Datos")
@@ -75,15 +90,30 @@ with st.sidebar:
         except Exception as e:  # credenciales, permisos o red
             st.error(f"No pude leer la carpeta de Drive: {e}")
             st.stop()
-        a_pick = [f for f in archivos if cfg.PATRON_PICKING in f["name"].upper()]
-        a_grua = [f for f in archivos if cfg.PATRON_GRUA in f["name"].upper()]
-        with st.spinner(f"Descargando {len(a_pick) + len(a_grua)} archivos..."):
+        es_csv = lambda f: f["name"].lower().endswith(".csv")
+        a_pick = [f for f in archivos if cfg.PATRON_PICKING in nombre_norm(f["name"]) and es_csv(f)]
+        a_grua = [f for f in archivos if cfg.PATRON_GRUA in nombre_norm(f["name"]) and es_csv(f)]
+        a_venta = [f for f in archivos if cfg.PATRON_VENTA in nombre_norm(f["name"])]
+        a_maestro = sorted([f for f in archivos if cfg.PATRON_MAESTRO in nombre_norm(f["name"])
+                            and f["name"].lower().endswith(".xlsx")], key=lambda f: f["modifiedTime"])[-1:]
+        a_factor = sorted([f for f in archivos if cfg.PATRON_FACTOR_PALLET in nombre_norm(f["name"])],
+                          key=lambda f: f["modifiedTime"])[-1:]
+        a_venta = [f for f in a_venta if f not in a_factor]
+        todos = a_pick + a_grua + a_venta + a_maestro + a_factor
+        with st.spinner(f"Descargando {len(todos)} archivos..."):
             contenidos_pick = tuple(bajar_drive(cred, f["id"], f["modifiedTime"]) for f in a_pick)
             contenidos_grua = tuple(bajar_drive(cred, f["id"], f["modifiedTime"]) for f in a_grua)
-        st.caption(f"{len(a_pick)} archivos de picking y {len(a_grua)} de grúa encontrados en Drive. "
+            contenidos_venta = tuple((bajar_drive(cred, f["id"], f["modifiedTime"]), f["name"]) for f in a_venta)
+            if a_maestro:
+                contenido_maestro = bajar_drive(cred, a_maestro[0]["id"], a_maestro[0]["modifiedTime"])
+            if a_factor:
+                factor_pallet = (bajar_drive(cred, a_factor[0]["id"], a_factor[0]["modifiedTime"]),
+                                 a_factor[0]["name"])
+        st.caption(f"En Drive: {len(a_pick)} de picking, {len(a_grua)} de grúa, {len(a_venta)} de venta, "
+                   f"{len(a_maestro)} maestro de ubicaciones y {len(a_factor)} de cajas por pallet. "
                    "La lista se refresca sola cada hora o con el botón.")
         with st.expander("Ver archivos"):
-            for f in a_pick + a_grua:
+            for f in todos:
                 st.caption(f"{f['carpeta']}{f['name']}")
     else:
         arch_pick = st.file_uploader("Picking (CAJA_PICKEADA)", type="csv", accept_multiple_files=True)
@@ -91,6 +121,12 @@ with st.sidebar:
         st.caption("Puedes subir varios archivos de cada tipo; los registros repetidos se eliminan.")
         contenidos_pick = tuple(f.getvalue() for f in arch_pick or [])
         contenidos_grua = tuple(f.getvalue() for f in arch_grua or [])
+        arch_venta = st.file_uploader("Venta (para posiciones)", type=["csv", "xlsx"], accept_multiple_files=True)
+        arch_maestro = st.file_uploader("Maestro de ubicaciones (Datos para armar)", type="xlsx")
+        contenidos_venta = tuple((f.getvalue(), f.name) for f in arch_venta or [])
+        contenido_maestro = arch_maestro.getvalue() if arch_maestro else None
+        arch_factor = st.file_uploader("Cajas por pallet (CAJAS_X_PALLET)", type=["csv", "xlsx"])
+        factor_pallet = (arch_factor.getvalue(), arch_factor.name) if arch_factor else None
 
 st.title("Torre de control WMS")
 st.caption(f"CD Coquimbo · Turno {', '.join(cfg.TURNOS_ANALIZADOS)}")
@@ -101,7 +137,7 @@ if not contenidos_pick:
     st.stop()
 
 try:
-    listas, brechas, exclusiones, avisos = cargar_picking(contenidos_pick)
+    listas, brechas, exclusiones, avisos, lpns = cargar_picking(contenidos_pick)
 except ValueError as e:
     st.error(str(e))
     st.stop()
@@ -166,8 +202,8 @@ if grua is not None:
 periodo = (desde.strftime("%d/%m/%Y") if desde == hasta
            else f"{desde:%d/%m/%Y} al {hasta:%d/%m/%Y}")
 
-tab_res, tab_op, tab_zona, tab_tiempo, tab_grua, tab_calidad = st.tabs(
-    ["Resumen", "Operarios", "Zonas", "Tiempo no efectivo", "Grúa", "Calidad de datos"])
+tab_res, tab_op, tab_zona, tab_tiempo, tab_pos, tab_grua, tab_calidad = st.tabs(
+    ["Resumen", "Operarios", "Zonas", "Tiempo no efectivo", "Posiciones", "Grúa", "Calidad de datos"])
 
 # ---------------------------------------------------------------- resumen
 with tab_res:
@@ -297,6 +333,35 @@ with tab_zona:
                 help="Esperas y pausas justo antes de iniciar listas de esta zona."),
         })
 
+    st.subheader("Pallets armados en surtido")
+    if lpns is None:
+        st.info("El archivo de picking no trae nivel_lpn: no se pueden identificar los LPN de surtido.")
+    else:
+        Lp = lpns[lpns["fecha_op"].between(desde, hasta) & lpns["turno"].isin(cfg.TURNOS_ANALIZADOS)
+                  & ~lpns["zona"].isin(cfg.ZONAS_EXCLUIDAS)]
+        cp = proc.surtido_casi_pallet(Lp)
+        st.caption(f"LPN de surtido (nivel S) con una sola línea y {cfg.UMBRAL_LPN_CASI_PALLET} cajas o más: "
+                   "casi un pallet de un mismo artículo pickeado desde la posición, que después hay que "
+                   "consolidar en parrilla. 'Cajas típicas' es el tamaño más repetido de esos LPN; si es "
+                   "menor que las cajas por pallet del artículo, revisa la volumetría en el WMS.")
+        if cp.empty:
+            st.success("No hay LPN de surtido de ese tamaño en el período elegido.")
+        else:
+            c = st.columns(3)
+            c[0].metric("LPN casi pallet", fmt_num(cp["lpns_casi_pallet"].sum()))
+            c[1].metric("Cajas en esos LPN", fmt_num(cp["cajas_casi_pallet"].sum()))
+            c[2].metric("% de las cajas de surtido",
+                        f"{cp['cajas_casi_pallet'].sum() / Lp.loc[Lp['nivel'] == 'S', 'cajas'].sum():.1%}")
+            cp["pct_pct"] = cp["pct_cajas_casi_pallet"] * 100
+            st.dataframe(cp[["zona", "lpns_casi_pallet", "cajas_casi_pallet", "cajas_tipicas", "lpns_surtido", "pct_pct"]],
+                         hide_index=True, use_container_width=True, column_config={
+                             "zona": "Zona", "lpns_casi_pallet": "LPN casi pallet",
+                             "cajas_casi_pallet": st.column_config.NumberColumn("Cajas", format="%.0f"),
+                             "cajas_tipicas": "Cajas típicas por LPN",
+                             "lpns_surtido": "LPN de surtido totales",
+                             "pct_pct": st.column_config.NumberColumn("% cajas de surtido de la zona", format="%.1f%%"),
+                         })
+
     st.subheader("Pallet completo por zona")
     st.caption("No se compara con la meta ICEO: un pallet completo mueve muchas cajas en pocos minutos.")
     if zonas_pallet.empty:
@@ -349,6 +414,132 @@ with tab_tiempo:
                 "brecha_min": st.column_config.NumberColumn("Minutos", format="%.0f"),
                 "zona": "Zona siguiente lista",
             })
+
+# ---------------------------------------------------------------- posiciones
+with tab_pos:
+    st.subheader("Posiciones de picking")
+    if not contenidos_venta or contenido_maestro is None:
+        st.info("Para esta sección deja en Drive (o sube) el archivo de venta, con 'VENTA' en el nombre, "
+                "y el maestro de ubicaciones 'Datos para armar.xlsx'. Para la venta conviene CSV: "
+                "un Excel grande tarda bastante en leerse.")
+    else:
+        import posiciones as posmod
+        try:
+            det, zonas_pos, v_desde, v_hasta, n_dias, esperado = cargar_posiciones(contenidos_venta, contenido_maestro, factor_pallet)
+        except ValueError as e:
+            st.error(str(e))
+            det = None
+    if contenidos_venta and contenido_maestro is not None and det is not None:
+        st.caption(f"Venta del {v_desde:%d/%m/%Y} al {v_hasta:%d/%m/%Y} ({n_dias} días operativos). "
+                   "No depende del filtro de fecha. Día alto = percentil "
+                   f"{cfg.PERCENTIL_DIA_ALTO:.0%} de la venta diaria de cada SKU; capacidad en cajas.")
+        if factor_pallet:
+            st.caption("Se descuentan las cajas que salen como pallet completo (según cajas por pallet), "
+                       "suponiendo stock en ZT ALMACENAMIENTO. Si no hay stock, la demanda real sobre la "
+                       "posición es mayor.")
+        else:
+            st.warning("Falta el archivo de cajas por pallet: toda la venta se trata como si saliera de la "
+                       "posición de picking, y los SKUs con pedidos grandes aparecen más críticos de lo que son.")
+        res_d = posmod.resumen_diagnostico(det)
+        cuenta = res_d.set_index("diagnostico")
+        c = st.columns(4)
+        for col, d, txt in zip(c, posmod.ORDEN[:3] + ["Posición sin venta"],
+                               ["Críticos", "Reponen en turno", "Sin posición", "Posiciones sin venta"]):
+            fila = cuenta.loc[d]
+            col.metric(txt, int(fila["skus"]),
+                       f"{int(fila['skus_a'])} clase A" if d != "Posición sin venta" else None,
+                       delta_color="off")
+        afectadas = cuenta.loc[posmod.ORDEN[:2], "lineas_dia"].sum()
+        st.warning(f"Los SKUs críticos y los que reponen en turno concentran {fmt_num(afectadas)} líneas "
+                   f"por día ({afectadas / det['lineas_dia_prom'].sum():.0%} del picking).")
+
+        st.dataframe(res_d, hide_index=True, use_container_width=True, column_config={
+            "diagnostico": "Diagnóstico", "skus": "SKUs", "skus_a": "Clase A",
+            "lineas_dia": st.column_config.NumberColumn("Líneas/día", format="%.0f"),
+            "accion": st.column_config.TextColumn("Acción sugerida", width="large")})
+
+        ver = st.selectbox("Ver detalle de", posmod.ORDEN)
+        sub = det[det["diagnostico"] == ver].copy()
+        sub["pct_dias"] = sub["pct_dias_con_venta"] * 100
+        sub["pct_pallet_pct"] = sub["pct_pallet"] * 100
+        st.dataframe(
+            sub[["sku", "descripcion", "abc", "zona_trabajo", "zona_movimiento", "ubicaciones", "capacidad",
+                 "posiciones", "posiciones_necesarias_p90",
+                 "lineas_dia_prom", "cajas_dia_prom", "cajas_dia_p90", "reposiciones_dia_p90",
+                 "pct_pallet_pct", "cajas_por_linea", "pct_dias"]],
+            hide_index=True, use_container_width=True, column_config={
+                "sku": "SKU", "descripcion": "Descripción", "abc": "ABC",
+                "zona_trabajo": "Zona", "zona_movimiento": "Zona mov.", "ubicaciones": "Ubicación",
+                "capacidad": st.column_config.NumberColumn("Capacidad", format="%.0f"),
+                "posiciones": st.column_config.NumberColumn("Posiciones", format="%.0f"),
+                "posiciones_necesarias_p90": st.column_config.NumberColumn(
+                    "Posiciones para día alto", format="%.0f",
+                    help="Posiciones del tamaño actual que necesitaría para no reponer en un día alto."),
+                "lineas_dia_prom": st.column_config.NumberColumn("Líneas/día", format="%.1f"),
+                "cajas_dia_prom": st.column_config.NumberColumn("Cajas/día", format="%.0f"),
+                "cajas_dia_p90": st.column_config.NumberColumn(
+                    "Cajas día alto", format="%.0f", help="Cajas que salen desde la posición de picking en un día alto."),
+                "reposiciones_dia_p90": st.column_config.NumberColumn(
+                    "Reposiciones día alto", format="%.1f",
+                    help="Cajas en un día alto ÷ capacidad. Sobre 1: se vacía dentro del turno."),
+                "cajas_por_linea": st.column_config.NumberColumn(
+                    "Cajas/línea", format="%.1f",
+                    help="Si es alto, parte del volumen puede salir como pallet completo y la criticidad estar sobreestimada."),
+                "pct_dias": st.column_config.NumberColumn("% días con venta", format="%.0f%%"),
+                "pct_pallet_pct": st.column_config.NumberColumn(
+                    "% en pallet completo", format="%.0f%%",
+                    help="Parte de la venta del SKU que sale como pallet completo y no pasa por la posición."),
+            })
+
+        st.markdown("#### Carga de reposición por zona")
+        fig = px.bar(zonas_pos, x="zona_trabajo", y="reposiciones_dia", text_auto=".0f",
+                     color_discrete_sequence=[VERDE],
+                     labels={"zona_trabajo": "", "reposiciones_dia": "Reposiciones por día (promedio)"})
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### Pallet completo: esperado vs real")
+        if esperado is None:
+            st.info("Agrega el archivo de cajas por pallet para comparar el pallet completo esperado con el real.")
+        elif lpns is None:
+            st.info("El archivo de picking no trae nivel_lpn, así que no se puede medir el pallet completo real.")
+        else:
+            comp = posmod.comparar_pallet(esperado, lpns, cfg.TURNOS_ANALIZADOS)
+            if comp.empty:
+                st.info("No hay días de picking que calcen con la venta cargada: la venta de un día se "
+                        "pickea el día operativo siguiente. Carga picking de fechas posteriores a la venta.")
+            else:
+                st.caption("Esperado: cajas que según la venta y las cajas por pallet deberían salir como pallet "
+                           "completo. Real: cajas en LPN nivel L. Si el real es menor, esos pallets se armaron "
+                           "desde las posiciones de picking (probable falta de stock en almacenamiento o "
+                           "volumetría mal cargada).")
+                c = st.columns(3)
+                c[0].metric("Cajas esperadas en pallet", fmt_num(comp["cajas_esperadas"].sum()))
+                c[1].metric("Cajas reales en pallet (L)", fmt_num(comp["cajas_reales"].sum()))
+                tot = comp["cajas_esperadas"].sum()
+                c[2].metric("Cumplimiento", f"{comp['cajas_reales'].sum() / tot:.0%}" if tot else "-")
+                larga = comp.melt(id_vars="fecha_op", value_vars=["cajas_esperadas", "cajas_reales"],
+                                  var_name="serie", value_name="cajas")
+                larga["serie"] = larga["serie"].map({"cajas_esperadas": "Esperadas", "cajas_reales": "Reales (L)"})
+                fig = px.bar(larga, x="fecha_op", y="cajas", color="serie", barmode="group",
+                             color_discrete_sequence=["#B8BDC4", VERDE],
+                             labels={"fecha_op": "Fecha picking", "cajas": "Cajas en pallet completo", "serie": ""})
+                st.plotly_chart(fig, use_container_width=True)
+                comp["cumplimiento_pct"] = comp["cumplimiento"] * 100
+                st.dataframe(comp[["fecha_op", "pallets_esperados", "pallets_reales", "cajas_esperadas",
+                                   "cajas_reales", "cajas_faltantes", "cumplimiento_pct"]],
+                             hide_index=True, use_container_width=True, column_config={
+                                 "fecha_op": st.column_config.DateColumn("Fecha picking", format="DD/MM/YYYY"),
+                                 "pallets_esperados": st.column_config.NumberColumn("Pallets esperados", format="%.0f"),
+                                 "pallets_reales": "Pallets reales",
+                                 "cajas_esperadas": st.column_config.NumberColumn("Cajas esperadas", format="%.0f"),
+                                 "cajas_reales": st.column_config.NumberColumn("Cajas reales", format="%.0f"),
+                                 "cajas_faltantes": st.column_config.NumberColumn("Cajas armadas en surtido", format="%.0f"),
+                                 "cumplimiento_pct": st.column_config.NumberColumn("Cumplimiento", format="%.0f%%"),
+                             })
+
+        st.download_button("Descargar diagnóstico en Excel", posmod.a_excel(det, zonas_pos),
+                           file_name=f"posiciones_picking_{v_hasta:%Y%m%d}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # ---------------------------------------------------------------- grúa
 with tab_grua:

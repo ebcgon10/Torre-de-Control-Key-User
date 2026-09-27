@@ -15,12 +15,27 @@ TURNOS = [
 PATRON_PICKING = "CAJA_PICKEADA"
 PATRON_GRUA = "MOVIMIENTO_DE_GRUA"
 
+# LPN de surtido (nivel S) de un solo artículo con al menos estas cajas se consideran
+# "pallets armados en surtido" (debieron salir como pallet completo desde almacenamiento)
+UMBRAL_LPN_CASI_PALLET = 50
+
+# Días de la semana sin picking (0 = lunes ... 6 = domingo). La venta del sábado se pickea el lunes.
+DIAS_SIN_PICKING = [6]
+
+# Posiciones de picking
+PATRON_VENTA = "VENTA"                    # archivos de venta (CSV recomendado; Excel es lento)
+PATRON_MAESTRO = "DATOS PARA ARMAR"
+PATRON_FACTOR_PALLET = "CAJAS X PALLET"   # columnas ID_SKU_INV y CAJAS_POR_PALLET       # maestro de ubicaciones (Excel con hojas UBICACIONES, PREFERENCIA, ZM)
+VENTANA_VENTA_SEMANAS = 8                # el diagnóstico usa solo las últimas N semanas de venta (None = toda)
+MIN_LINEAS_DIA_OPERATIVO = 1000           # días con menos líneas de venta no se consideran
+PERCENTIL_DIA_ALTO = 0.9                  # "día alto" = percentil 90 de la venta diaria del SKU
+
 # Turnos que analiza la app (la app muestra solo estos)
 TURNOS_ANALIZADOS = ["TC"]
 
-# Zonas de pallet completo (recogida de pallets enteros hacia la carga).
-# Se informan aparte y no entran en la productividad cj/HH, igual que en el Power BI.
-# Cualquier zona que empiece con estos textos cuenta como pallet completo.
+# El pallet completo se identifica por la columna nivel_lpn del exporte (L = pallet, S = surtido).
+# Solo si el archivo no trae esa columna se usa el nombre de la zona:
+# cualquier zona que empiece con estos textos cuenta como pallet completo.
 PREFIJOS_PALLET_COMPLETO = ["ZT ALMACENAMIENTO"]
 
 # Zonas que no son picking y se excluyen de los indicadores.

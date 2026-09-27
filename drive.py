@@ -20,8 +20,8 @@ def conectar(credenciales_json: str):
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def listar_csv(servicio, carpeta_id: str) -> list[dict]:
-    """Todos los CSV dentro de la carpeta y sus subcarpetas: id, name, modifiedTime, carpeta."""
+def listar_archivos(servicio, carpeta_id: str, extensiones=(".csv", ".xlsx")) -> list[dict]:
+    """Archivos CSV y Excel de la carpeta y sus subcarpetas: id, name, modifiedTime, carpeta."""
     archivos, pendientes = [], [(carpeta_id, "")]
     while pendientes:
         actual, ruta = pendientes.pop()
@@ -36,7 +36,7 @@ def listar_csv(servicio, carpeta_id: str) -> list[dict]:
             for f in r.get("files", []):
                 if f["mimeType"] == CARPETA:
                     pendientes.append((f["id"], f"{ruta}{f['name']}/"))
-                elif f["name"].lower().endswith(".csv"):
+                elif f["name"].lower().endswith(tuple(extensiones)):
                     f["carpeta"] = ruta
                     archivos.append(f)
             token = r.get("nextPageToken")

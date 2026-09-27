@@ -127,6 +127,11 @@ def preparar_picking(df: pd.DataFrame):
         inicio=("inicio", "min"), termino=("termino", "max"),
         cajas=("cajas", "sum"), lineas=("lineas", "sum"), lpns=("usuario", "size"),
     )
+    tiene_nivel = "nivel_lpn" in d.columns
+    if tiene_nivel:
+        # Nivel del LPN: L = pallet completo, S = surtido (picking de cajas)
+        d["es_pallet"] = d["nivel_lpn"].fillna("").str.strip().str.upper() == "L"
+        agregaciones["lpns_pallet"] = ("es_pallet", "sum")
     if "numero_de_viaje" in d.columns:
         agregaciones["viaje"] = ("numero_de_viaje", "first")
     listas = d.groupby("id_de_lista", as_index=False).agg(**agregaciones)
@@ -147,13 +152,53 @@ def preparar_picking(df: pd.DataFrame):
         )
     listas["dur_ef_min"] = listas["dur_min"].clip(lower=cfg.DURACION_MIN_LISTA_MIN)
 
-    listas["tipo_picking"] = clasificar_tipo(listas["zona"])
+    if tiene_nivel:
+        mixtas = int(((listas["lpns_pallet"] > 0) & (listas["lpns_pallet"] < listas["lpns"])).sum())
+        if mixtas:
+            avisos.append(f"{mixtas} listas mezclan LPN de pallet completo (L) y de surtido (S); "
+                          "se clasificaron según la mayoría.")
+        listas["tipo_picking"] = np.where(listas["lpns_pallet"] > listas["lpns"] / 2, PALLET, MANUAL)
+    else:
+        avisos.append("El archivo no trae la columna nivel_lpn: el pallet completo se identificó "
+                      "por el nombre de la zona (config.PREFIJOS_PALLET_COMPLETO).")
+        listas["tipo_picking"] = clasificar_tipo(listas["zona"])
     listas["turno"], listas["fecha_op"] = asignar_turno(listas["inicio"])
     n_sin = int((listas["turno"] == "Sin turno").sum())
     if n_sin:
         avisos.append(f"{n_sin} listas empiezan fuera de los turnos definidos en config.py.")
 
     return listas.reset_index(drop=True), exclusiones, avisos
+
+
+def preparar_lpns(df: pd.DataFrame):
+    """Detalle por LPN (cajas, líneas, nivel L/S). None si el archivo no trae nivel_lpn o lpn."""
+    if not {"lpn", "nivel_lpn"}.issubset(df.columns):
+        return None
+    d = df.drop_duplicates(subset=["id_de_lista", "lpn"]).copy()
+    d["inicio"] = pd.to_datetime(d["h_inicio"].str.strip(), format="%d/%m/%Y %H:%M", errors="coerce")
+    d = d[d["inicio"].notna()].copy()
+    d["nivel"] = d["nivel_lpn"].fillna("").str.strip().str.upper()
+    d["zona"] = d["zona_de_trabajo"].fillna("").str.strip().replace("", "Sin zona")
+    for c in ("cajas", "lineas"):
+        d[c] = pd.to_numeric(d[c].str.strip(), errors="coerce").fillna(0)
+    d["turno"], d["fecha_op"] = asignar_turno(d["inicio"])
+    return d[["fecha_op", "turno", "zona", "id_de_lista", "lpn", "nivel", "cajas", "lineas"]].reset_index(drop=True)
+
+
+def surtido_casi_pallet(lpns: pd.DataFrame) -> pd.DataFrame:
+    """LPN de surtido (S) de un solo artículo y muchas cajas: pallets armados desde la posición
+    de picking en vez de salir completos desde almacenamiento."""
+    s = lpns[lpns["nivel"] == "S"].copy()
+    s["casi_pallet"] = (s["lineas"] <= 1) & (s["cajas"] >= cfg.UMBRAL_LPN_CASI_PALLET)
+    cp = s[s["casi_pallet"]]
+    tipico = cp.groupby("zona")["cajas"].agg(lambda x: int(x.mode().iloc[0]) if len(x) else None)
+    z = s.groupby("zona").agg(lpns_surtido=("lpn", "size"), cajas_surtido=("cajas", "sum"),
+                              lpns_casi_pallet=("casi_pallet", "sum"))
+    z["cajas_casi_pallet"] = cp.groupby("zona")["cajas"].sum()
+    z["cajas_tipicas"] = tipico
+    z = z.fillna({"cajas_casi_pallet": 0}).reset_index()
+    z["pct_cajas_casi_pallet"] = np.where(z["cajas_surtido"] > 0, z["cajas_casi_pallet"] / z["cajas_surtido"], 0)
+    return z[z["lpns_casi_pallet"] > 0].sort_values("cajas_casi_pallet", ascending=False)
 
 
 def calcular_brechas(listas: pd.DataFrame) -> pd.DataFrame:

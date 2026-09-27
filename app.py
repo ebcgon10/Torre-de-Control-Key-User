@@ -91,12 +91,12 @@ with st.sidebar:
             st.error(f"No pude leer la carpeta de Drive: {e}")
             st.stop()
         es_csv = lambda f: f["name"].lower().endswith(".csv")
-        a_pick = [f for f in archivos if cfg.PATRON_PICKING in nombre_norm(f["name"]) and es_csv(f)]
-        a_grua = [f for f in archivos if cfg.PATRON_GRUA in nombre_norm(f["name"]) and es_csv(f)]
-        a_venta = [f for f in archivos if cfg.PATRON_VENTA in nombre_norm(f["name"])]
-        a_maestro = sorted([f for f in archivos if cfg.PATRON_MAESTRO in nombre_norm(f["name"])
+        a_pick = [f for f in archivos if nombre_norm(cfg.PATRON_PICKING) in nombre_norm(f["name"]) and es_csv(f)]
+        a_grua = [f for f in archivos if nombre_norm(cfg.PATRON_GRUA) in nombre_norm(f["name"]) and es_csv(f)]
+        a_venta = [f for f in archivos if nombre_norm(cfg.PATRON_VENTA) in nombre_norm(f["name"])]
+        a_maestro = sorted([f for f in archivos if nombre_norm(cfg.PATRON_MAESTRO) in nombre_norm(f["name"])
                             and f["name"].lower().endswith(".xlsx")], key=lambda f: f["modifiedTime"])[-1:]
-        a_factor = sorted([f for f in archivos if cfg.PATRON_FACTOR_PALLET in nombre_norm(f["name"])],
+        a_factor = sorted([f for f in archivos if nombre_norm(cfg.PATRON_FACTOR_PALLET) in nombre_norm(f["name"])],
                           key=lambda f: f["modifiedTime"])[-1:]
         a_venta = [f for f in a_venta if f not in a_factor]
         todos = a_pick + a_grua + a_venta + a_maestro + a_factor

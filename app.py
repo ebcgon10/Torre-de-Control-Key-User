@@ -31,31 +31,85 @@ def cargar_grua(contenidos: tuple):
     return proc.preparar_grua(df.drop_duplicates())
 
 
-# ---------------------------------------------------------------- barra lateral
+# ---------------------------------------------------------------- origen de datos
+def secretos_drive():
+    try:
+        return st.secrets["gcp_json"], st.secrets["drive_folder_id"]
+    except (KeyError, FileNotFoundError):
+        return None
+
+
+@st.cache_resource
+def cliente_drive(credenciales_json):
+    import drive
+    return drive.conectar(credenciales_json)
+
+
+@st.cache_data(ttl=3600, show_spinner="Buscando archivos en Drive...")
+def listar_drive(credenciales_json, carpeta_id):
+    import drive
+    return drive.listar_csv(cliente_drive(credenciales_json), carpeta_id)
+
+
+@st.cache_data(show_spinner=False, max_entries=200)
+def bajar_drive(credenciales_json, archivo_id, modificado):
+    # "modificado" forma parte de la clave de caché: si el archivo cambia en Drive, se vuelve a bajar
+    import drive
+    return drive.descargar(cliente_drive(credenciales_json), archivo_id)
+
+
+conf_drive = secretos_drive()
+contenidos_pick, contenidos_grua = (), ()
+
 with st.sidebar:
     st.header("Datos")
-    arch_pick = st.file_uploader("Picking (CAJA_PICKEADA)", type="csv", accept_multiple_files=True)
-    arch_grua = st.file_uploader("Movimientos de grúa", type="csv", accept_multiple_files=True)
-    st.caption("Puedes subir varios archivos de cada tipo; los registros repetidos se eliminan.")
+    opciones = (["Google Drive", "Subir archivos"] if conf_drive else ["Subir archivos"])
+    origen = st.radio("Origen", opciones, horizontal=True)
+
+    if origen == "Google Drive":
+        cred, carpeta = conf_drive
+        if st.button("Actualizar desde Drive", use_container_width=True):
+            listar_drive.clear()
+        try:
+            archivos = listar_drive(cred, carpeta)
+        except Exception as e:  # credenciales, permisos o red
+            st.error(f"No pude leer la carpeta de Drive: {e}")
+            st.stop()
+        a_pick = [f for f in archivos if cfg.PATRON_PICKING in f["name"].upper()]
+        a_grua = [f for f in archivos if cfg.PATRON_GRUA in f["name"].upper()]
+        with st.spinner(f"Descargando {len(a_pick) + len(a_grua)} archivos..."):
+            contenidos_pick = tuple(bajar_drive(cred, f["id"], f["modifiedTime"]) for f in a_pick)
+            contenidos_grua = tuple(bajar_drive(cred, f["id"], f["modifiedTime"]) for f in a_grua)
+        st.caption(f"{len(a_pick)} archivos de picking y {len(a_grua)} de grúa encontrados en Drive. "
+                   "La lista se refresca sola cada hora o con el botón.")
+        with st.expander("Ver archivos"):
+            for f in a_pick + a_grua:
+                st.caption(f"{f['carpeta']}{f['name']}")
+    else:
+        arch_pick = st.file_uploader("Picking (CAJA_PICKEADA)", type="csv", accept_multiple_files=True)
+        arch_grua = st.file_uploader("Movimientos de grúa", type="csv", accept_multiple_files=True)
+        st.caption("Puedes subir varios archivos de cada tipo; los registros repetidos se eliminan.")
+        contenidos_pick = tuple(f.getvalue() for f in arch_pick or [])
+        contenidos_grua = tuple(f.getvalue() for f in arch_grua or [])
 
 st.title("Torre de control WMS")
 st.caption(f"CD Coquimbo · Turno {', '.join(cfg.TURNOS_ANALIZADOS)}")
 
-if not arch_pick:
-    st.info("Sube uno o más archivos CAJA_PICKEADA en la barra lateral para ver los indicadores. "
-            "El archivo de grúa es opcional.")
+if not contenidos_pick:
+    st.info("No hay archivos de picking. Sube uno o más CAJA_PICKEADA en la barra lateral, "
+            "o déjalos en la carpeta de Drive. El archivo de grúa es opcional.")
     st.stop()
 
 try:
-    listas, brechas, exclusiones, avisos = cargar_picking(tuple(f.getvalue() for f in arch_pick))
+    listas, brechas, exclusiones, avisos = cargar_picking(contenidos_pick)
 except ValueError as e:
     st.error(str(e))
     st.stop()
 
 grua = None
-if arch_grua:
+if contenidos_grua:
     try:
-        grua = cargar_grua(tuple(f.getvalue() for f in arch_grua))
+        grua = cargar_grua(contenidos_grua)
     except ValueError as e:
         st.error(str(e))
 

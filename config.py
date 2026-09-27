@@ -11,6 +11,10 @@ TURNOS = [
     ("TC", "00:00", "08:00"),
 ]
 
+# Nombres de archivo que la app busca en Drive (en mayúsculas, basta con que el nombre lo contenga)
+PATRON_PICKING = "CAJA_PICKEADA"
+PATRON_GRUA = "MOVIMIENTO_DE_GRUA"
+
 # Turnos que analiza la app (la app muestra solo estos)
 TURNOS_ANALIZADOS = ["TC"]
 

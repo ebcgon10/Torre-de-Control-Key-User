@@ -39,7 +39,7 @@ with st.sidebar:
     st.caption("Puedes subir varios archivos de cada tipo; los registros repetidos se eliminan.")
 
 st.title("Torre de control WMS")
-st.caption("CD Coquimbo")
+st.caption(f"CD Coquimbo · Turno {', '.join(cfg.TURNOS_ANALIZADOS)}")
 
 if not arch_pick:
     st.info("Sube uno o más archivos CAJA_PICKEADA en la barra lateral para ver los indicadores. "
@@ -60,7 +60,11 @@ if arch_grua:
         st.error(str(e))
 
 # ---------------------------------------------------------------- filtros
-fechas = sorted(listas["fecha_op"].dt.date.unique())
+foco = listas["turno"].isin(cfg.TURNOS_ANALIZADOS)
+if not foco.any():
+    st.warning(f"El archivo no tiene listas del turno {', '.join(cfg.TURNOS_ANALIZADOS)}.")
+    st.stop()
+fechas = sorted(listas.loc[foco, "fecha_op"].dt.date.unique())
 with st.sidebar:
     st.header("Filtros")
     modo = st.radio("Período", ["Un día", "Rango de fechas"], horizontal=True)
@@ -72,10 +76,6 @@ with st.sidebar:
         rango = st.date_input("Fecha operativa", value=(fechas[0], fechas[-1]),
                               min_value=fechas[0], max_value=fechas[-1],
                               format="DD/MM/YYYY")
-    turnos_sel = st.multiselect("Turno", sorted(listas["turno"].unique()),
-                                default=sorted(listas["turno"].unique()))
-    zonas_sel = st.multiselect("Zona de trabajo", sorted(listas["zona"].unique()),
-                               default=sorted(listas["zona"].unique()))
 
 if not isinstance(rango, tuple) or len(rango) != 2:
     st.info("Elige la fecha de término del rango.")
@@ -84,21 +84,25 @@ desde, hasta = pd.Timestamp(rango[0]), pd.Timestamp(rango[1])
 
 
 def filtrar(df):
-    m = (df["fecha_op"].between(desde, hasta) & df["turno"].isin(turnos_sel)
-         & df["zona"].isin(zonas_sel))
+    m = (df["fecha_op"].between(desde, hasta) & df["turno"].isin(cfg.TURNOS_ANALIZADOS)
+         & ~df["zona"].isin(cfg.ZONAS_EXCLUIDAS))
     return df[m]
 
 
 L, B = filtrar(listas), filtrar(brechas)
 if L.empty:
-    st.warning("No hay listas para los filtros elegidos. Amplía el rango de fechas o los turnos.")
+    st.warning("No hay listas para el período elegido. Amplía el rango de fechas.")
     st.stop()
 
 op_diario = proc.resumen_operarios(L, B)
 operarios = proc.consolidar_operarios(op_diario)
 operarios["utilizacion_pct"] = operarios["utilizacion"] * 100
 turnos = proc.resumen_turnos(L, B)
-zonas = proc.resumen_zonas(L, B)
+turnos["pct_pallet_pct"] = turnos["pct_pallet"] * 100
+L_man = L[L["tipo_picking"] == proc.MANUAL]
+L_pal = L[L["tipo_picking"] == proc.PALLET]
+zonas = proc.resumen_zonas(L_man, B)
+zonas_pallet = proc.resumen_zonas(L_pal, B)
 
 G, grua_sem = None, None
 if grua is not None:
@@ -115,25 +119,38 @@ tab_res, tab_op, tab_zona, tab_tiempo, tab_grua, tab_calidad = st.tabs(
 with tab_res:
     st.subheader(f"Resumen {periodo}")
     hh = turnos["horas_hombre"].sum()
-    h_ef = turnos["min_efectivos"].sum() / 60
-    cajas = turnos["cajas"].sum()
+    h_ef = turnos["min_manual"].sum() / 60
+    cajas = turnos["cajas_manual"].sum()
     prod_total = cajas / hh if hh else 0
+    st.markdown("##### Picking manual")
     c = st.columns(5)
     c[0].metric("Cajas pickeadas", fmt_num(cajas))
-    c[1].metric("Operarios", int(L["usuario"].nunique()))
+    c[1].metric("Operarios", int(L_man["usuario"].nunique()))
     c[2].metric("cj/HH total", fmt_num(prod_total),
                 delta=f"{fmt_num(prod_total - cfg.META_ICEO)} vs meta {cfg.META_ICEO}")
     c[3].metric("cj/HH efectiva", fmt_num(cajas / h_ef if h_ef else 0))
     c[4].metric("Tiempo en listas", f"{h_ef / hh:.0%}" if hh else "-",
-                help="Horas dentro de listas sobre horas-hombre (ventana de picking × operarios), igual que el Power BI.")
+                help="Horas dentro de listas manuales sobre horas-hombre (ventana de picking manual × operarios), igual que el Power BI.")
+
+    st.markdown("##### Pallet completo")
+    cajas_pal = turnos["cajas_pallet"].sum()
+    pallets = turnos["lpns_pallet"].sum()
+    c = st.columns(5)
+    c[0].metric("Cajas en pallet completo", fmt_num(cajas_pal))
+    c[1].metric("Pallets", fmt_num(pallets),
+                help="LPN recogidos en zonas de pallet completo.")
+    c[2].metric("% de cajas en pallet completo",
+                f"{cajas_pal / (cajas + cajas_pal):.1%}" if cajas + cajas_pal else "-")
+    c[3].metric("Min. por pallet", fmt_num(turnos["min_pallet"].sum() / pallets, 1) if pallets else "-")
+    c[4].metric("Operarios", int(L_pal["usuario"].nunique()))
 
     st.markdown("#### Alertas")
     for nivel, texto in proc.generar_alertas(turnos, operarios, zonas, grua_sem):
         getattr(st, nivel)(texto)
 
     if turnos["fecha_op"].nunique() > 1:
-        tend = turnos.groupby("fecha_op").agg(cajas=("cajas", "sum"), hh=("horas_hombre", "sum"),
-                                              mef=("min_efectivos", "sum")).reset_index()
+        tend = turnos.groupby("fecha_op").agg(cajas=("cajas_manual", "sum"), hh=("horas_hombre", "sum"),
+                                              mef=("min_manual", "sum")).reset_index()
         tend["cj/HH total"] = tend["cajas"] / tend["hh"]
         tend["cj/HH efectiva"] = tend["cajas"] / (tend["mef"] / 60)
         fig = px.line(tend, x="fecha_op", y=["cj/HH total", "cj/HH efectiva"], markers=True,
@@ -145,13 +162,18 @@ with tab_res:
 
     st.markdown("#### Detalle por turno")
     st.dataframe(
-        turnos[["fecha_op", "turno", "inicio", "fin", "operarios", "listas", "cajas",
-                "cj_hh_total", "cj_hh_efectiva", "min_espera", "min_pausa"]],
+        turnos[["fecha_op", "turno", "inicio", "fin", "operarios_manual", "listas_manual", "cajas_manual",
+                "cj_hh_total", "cj_hh_efectiva", "cajas_pallet", "pct_pallet_pct", "min_espera", "min_pausa"]],
         hide_index=True, use_container_width=True,
         column_config={
             "fecha_op": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
             "inicio": st.column_config.DatetimeColumn("Inicio picking", format="HH:mm"),
             "fin": st.column_config.DatetimeColumn("Fin picking", format="HH:mm"),
+            "operarios_manual": "Operarios",
+            "listas_manual": "Listas",
+            "cajas_manual": "Cajas manual",
+            "cajas_pallet": "Cajas pallet completo",
+            "pct_pallet_pct": st.column_config.NumberColumn("% pallet completo", format="%.1f%%"),
             "cj_hh_total": st.column_config.NumberColumn("cj/HH total", format="%.0f"),
             "cj_hh_efectiva": st.column_config.NumberColumn("cj/HH efectiva", format="%.0f"),
             "min_espera": st.column_config.NumberColumn("Min. espera", format="%.0f"),
@@ -161,8 +183,8 @@ with tab_res:
 # ---------------------------------------------------------------- operarios
 with tab_op:
     st.subheader("Uso del tiempo por operario")
-    st.caption("Utilización = minutos dentro de listas / minutos entre su primera y última lista, "
-               "descontando colación. Ordenado de menor a mayor.")
+    st.caption("Utilización = minutos dentro de listas (manuales y de pallet completo) / minutos entre "
+               "su primera y última lista, descontando colación. Ordenado de menor a mayor.")
     fig = px.bar(operarios, x="utilizacion", y="nombre", orientation="h",
                  color_discrete_sequence=[VERDE],
                  labels={"utilizacion": "Utilización", "nombre": ""})
@@ -172,9 +194,9 @@ with tab_op:
     st.plotly_chart(fig, use_container_width=True)
 
     st.dataframe(
-        operarios[["nombre", "turnos", "listas", "cajas", "horas_efectivas", "horas_disponibles",
-                   "utilizacion_pct", "cj_h_efectiva", "cj_h_disponible", "min_espera", "min_pausa",
-                   "min_inicio_tardio"]],
+        operarios[["nombre", "turnos", "listas_manual", "cajas_manual", "listas_pallet", "cajas_pallet",
+                   "horas_efectivas", "horas_disponibles", "utilizacion_pct", "cj_h_manual",
+                   "min_espera", "min_pausa", "min_inicio_tardio"]],
         hide_index=True, use_container_width=True,
         column_config={
             "nombre": "Operario",
@@ -182,8 +204,13 @@ with tab_op:
             "horas_disponibles": st.column_config.NumberColumn("Horas disponibles", format="%.2f"),
             "utilizacion_pct": st.column_config.ProgressColumn("Utilización", format="%.0f%%",
                                                                min_value=0, max_value=100),
-            "cj_h_efectiva": st.column_config.NumberColumn("cj/h en listas", format="%.0f"),
-            "cj_h_disponible": st.column_config.NumberColumn("cj/h disponible", format="%.0f"),
+            "listas_manual": "Listas manual",
+            "cajas_manual": "Cajas manual",
+            "listas_pallet": "Listas pallet",
+            "cajas_pallet": "Cajas pallet",
+            "cj_h_manual": st.column_config.NumberColumn(
+                "cj/h manual", format="%.0f",
+                help="Cajas de picking manual por hora dentro de listas manuales."),
             "min_espera": st.column_config.NumberColumn("Min. espera", format="%.0f"),
             "min_pausa": st.column_config.NumberColumn("Min. pausa", format="%.0f"),
             "min_inicio_tardio": st.column_config.NumberColumn(
@@ -193,7 +220,7 @@ with tab_op:
 
 # ---------------------------------------------------------------- zonas
 with tab_zona:
-    st.subheader("Rendimiento por zona de trabajo")
+    st.subheader("Picking manual por zona de trabajo")
     st.caption("Productividad en tiempo efectivo: si una zona queda bajo la meta aquí, "
                "el problema está dentro de la lista (recorrido, ubicación, tipo de producto), no en las esperas.")
     fig = px.bar(zonas, x="zona", y="cj_h_efectiva", color_discrete_sequence=[VERDE],
@@ -215,6 +242,21 @@ with tab_zona:
                 "Min. espera previa", format="%.0f",
                 help="Esperas y pausas justo antes de iniciar listas de esta zona."),
         })
+
+    st.subheader("Pallet completo por zona")
+    st.caption("No se compara con la meta ICEO: un pallet completo mueve muchas cajas en pocos minutos.")
+    if zonas_pallet.empty:
+        st.info("No hay listas de pallet completo en el período elegido.")
+    else:
+        st.dataframe(
+            zonas_pallet[["zona", "listas", "lpns", "cajas", "min_por_lpn", "min_espera_antes"]],
+            hide_index=True, use_container_width=True,
+            column_config={
+                "zona": "Zona",
+                "lpns": "Pallets",
+                "min_por_lpn": st.column_config.NumberColumn("Min. por pallet", format="%.1f"),
+                "min_espera_antes": st.column_config.NumberColumn("Min. espera previa", format="%.0f"),
+            })
 
 # ---------------------------------------------------------------- tiempo no efectivo
 with tab_tiempo:
@@ -257,6 +299,7 @@ with tab_tiempo:
 # ---------------------------------------------------------------- grúa
 with tab_grua:
     st.subheader("Movimientos de grúa")
+    st.caption("El exporte de grúa no trae la hora, así que esta sección muestra el día completo (todos los turnos).")
     if G is None:
         st.info("Sube el archivo de movimientos de grúa en la barra lateral para ver esta sección.")
     elif G.empty:
@@ -307,4 +350,3 @@ with tab_calidad:
     if n_sol:
         st.warning(f"{n_sol} veces un operario inició una lista antes de terminar la anterior. "
                    "Se contaron como 0 minutos entre listas.")
-                   

@@ -11,6 +11,18 @@ TURNOS = [
     ("TC", "00:00", "08:00"),
 ]
 
+# Turnos que analiza la app (la app muestra solo estos)
+TURNOS_ANALIZADOS = ["TC"]
+
+# Zonas de pallet completo (recogida de pallets enteros hacia la carga).
+# Se informan aparte y no entran en la productividad cj/HH, igual que en el Power BI.
+# Cualquier zona que empiece con estos textos cuenta como pallet completo.
+PREFIJOS_PALLET_COMPLETO = ["ZT ALMACENAMIENTO"]
+
+# Zonas que no son picking y se excluyen de los indicadores.
+# Escribe el nombre exacto como aparece en el archivo, ej. "ZT ALMACENAMIENTO".
+ZONAS_EXCLUIDAS = []
+
 # Clasificación del tiempo entre listas (minutos)
 UMBRAL_ESPERA_MIN = 5    # bajo esto: normal (traslado, tomar la siguiente lista)
 UMBRAL_PAUSA_MIN = 15    # entre espera y pausa: espera; sobre esto: pausa

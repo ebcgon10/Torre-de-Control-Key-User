@@ -72,6 +72,17 @@ def asignar_turno(ts: pd.Series):
 
 # ---------------------------------------------------------------- picking
 
+MANUAL, PALLET = "Manual", "Pallet completo"
+
+
+def clasificar_tipo(zona: pd.Series) -> pd.Series:
+    """Pallet completo si la zona empieza con alguno de config.PREFIJOS_PALLET_COMPLETO."""
+    z = zona.str.upper()
+    es_pallet = pd.Series(False, index=zona.index)
+    for prefijo in cfg.PREFIJOS_PALLET_COMPLETO:
+        es_pallet |= z.str.startswith(prefijo.upper())
+    return np.where(es_pallet, PALLET, MANUAL)
+
 def preparar_picking(df: pd.DataFrame):
     """Limpia CAJA_PICKEADA y la deja a nivel de lista.
 
@@ -136,6 +147,7 @@ def preparar_picking(df: pd.DataFrame):
         )
     listas["dur_ef_min"] = listas["dur_min"].clip(lower=cfg.DURACION_MIN_LISTA_MIN)
 
+    listas["tipo_picking"] = clasificar_tipo(listas["zona"])
     listas["turno"], listas["fecha_op"] = asignar_turno(listas["inicio"])
     n_sin = int((listas["turno"] == "Sin turno").sum())
     if n_sin:
@@ -186,12 +198,29 @@ def _asegurar_columnas(df, columnas):
 TIPOS_MIN = ["min_normal", "min_espera", "min_pausa", "min_colacion"]
 
 
+def _por_tipo(listas, claves):
+    """Listas, cajas y minutos separados en manual y pallet completo."""
+    partes = []
+    for tipo, suf in ((MANUAL, "manual"), (PALLET, "pallet")):
+        sub = listas[listas["tipo_picking"] == tipo]
+        partes.append(sub.groupby(claves).agg(**{
+            f"listas_{suf}": ("id_de_lista", "size"),
+            f"cajas_{suf}": ("cajas", "sum"),
+            f"lineas_{suf}": ("lineas", "sum"),
+            f"lpns_{suf}": ("lpns", "sum"),
+            f"min_{suf}": ("dur_ef_min", "sum"),
+            f"operarios_{suf}": ("usuario", "nunique"),
+        }))
+    return pd.concat(partes, axis=1).fillna(0)
+
+
 def resumen_operarios(listas, brechas):
-    """Una fila por operario, fecha operativa y turno."""
+    """Una fila por operario, fecha operativa y turno. Considera todas sus listas."""
     op = listas.groupby(CLAVE_OPERARIO + ["nombre"]).agg(
-        listas=("id_de_lista", "size"), cajas=("cajas", "sum"), lineas=("lineas", "sum"),
-        min_efectivos=("dur_ef_min", "sum"), primera=("inicio", "min"), ultima=("termino", "max"),
+        primera=("inicio", "min"), ultima=("termino", "max"),
     ).reset_index()
+    op = op.join(_por_tipo(listas, CLAVE_OPERARIO), on=CLAVE_OPERARIO)
+    op["min_efectivos"] = op["min_manual"] + op["min_pallet"]
     op = op.merge(_minutos_por_tipo(brechas, CLAVE_OPERARIO), on=CLAVE_OPERARIO, how="left")
     op = _asegurar_columnas(op, TIPOS_MIN).fillna({c: 0 for c in TIPOS_MIN})
 
@@ -206,8 +235,10 @@ def resumen_operarios(listas, brechas):
 def consolidar_operarios(op):
     """Suma el detalle diario por operario para el período filtrado."""
     g = op.groupby(["usuario", "nombre"]).agg(
-        turnos=("fecha_op", "size"), listas=("listas", "sum"), cajas=("cajas", "sum"),
-        lineas=("lineas", "sum"), min_efectivos=("min_efectivos", "sum"),
+        turnos=("fecha_op", "size"),
+        listas_manual=("listas_manual", "sum"), cajas_manual=("cajas_manual", "sum"),
+        listas_pallet=("listas_pallet", "sum"), cajas_pallet=("cajas_pallet", "sum"),
+        min_manual=("min_manual", "sum"), min_efectivos=("min_efectivos", "sum"),
         min_disponibles=("min_disponibles", "sum"), min_espera=("min_espera", "sum"),
         min_pausa=("min_pausa", "sum"), min_inicio_tardio=("min_inicio_tardio", "mean"),
     ).reset_index()
@@ -215,33 +246,40 @@ def consolidar_operarios(op):
     g["horas_disponibles"] = g["min_disponibles"] / 60
     g["utilizacion"] = np.where(g["min_disponibles"] > 0,
                                 g["min_efectivos"] / g["min_disponibles"], np.nan)
-    g["cj_h_efectiva"] = g["cajas"] / g["horas_efectivas"]
-    g["cj_h_disponible"] = np.where(g["horas_disponibles"] > 0,
-                                    g["cajas"] / g["horas_disponibles"], np.nan)
+    g["cj_h_manual"] = np.where(g["min_manual"] > 0,
+                                g["cajas_manual"] / (g["min_manual"] / 60), np.nan)
     return g.sort_values("utilizacion")
 
 
 def resumen_turnos(listas, brechas):
-    """Una fila por fecha operativa y turno, con productividad al estilo del Power BI."""
-    t = listas.groupby(["fecha_op", "turno"]).agg(
-        cajas=("cajas", "sum"), lineas=("lineas", "sum"), listas=("id_de_lista", "size"),
-        operarios=("usuario", "nunique"), min_efectivos=("dur_ef_min", "sum"),
-        inicio=("inicio", "min"), fin=("termino", "max"),
-    ).reset_index()
-    t = t.merge(_minutos_por_tipo(brechas, ["fecha_op", "turno"]), on=["fecha_op", "turno"], how="left")
+    """Una fila por fecha operativa y turno.
+
+    La productividad (cj/HH) se calcula solo sobre picking manual, igual que el
+    Power BI; el pallet completo se informa aparte.
+    """
+    claves = ["fecha_op", "turno"]
+    man = listas[listas["tipo_picking"] == MANUAL]
+    t = listas.groupby(claves).agg(inicio_total=("inicio", "min"), fin_total=("termino", "max"))
+    t = t.join(man.groupby(claves).agg(inicio=("inicio", "min"), fin=("termino", "max")))
+    t = t.join(_por_tipo(listas, claves)).reset_index()
+    t = t.merge(_minutos_por_tipo(brechas, claves), on=claves, how="left")
     t = _asegurar_columnas(t, TIPOS_MIN).fillna({c: 0 for c in TIPOS_MIN})
-    t["horas_ventana"] = (t["fin"] - t["inicio"]).dt.total_seconds() / 3600
-    # Igual que el BI: horas-hombre = ventana de picking del turno x operarios
-    t["horas_hombre"] = t["horas_ventana"] * t["operarios"]
-    t["cj_hh_total"] = np.where(t["horas_hombre"] > 0, t["cajas"] / t["horas_hombre"], np.nan)
-    t["cj_hh_efectiva"] = t["cajas"] / (t["min_efectivos"] / 60)
+
+    t["horas_ventana"] = ((t["fin"] - t["inicio"]).dt.total_seconds() / 3600).fillna(0)
+    # Igual que el BI: horas-hombre = ventana de picking manual x operarios de picking manual
+    t["horas_hombre"] = t["horas_ventana"] * t["operarios_manual"]
+    t["cj_hh_total"] = np.where(t["horas_hombre"] > 0, t["cajas_manual"] / t["horas_hombre"], np.nan)
+    t["cj_hh_efectiva"] = np.where(t["min_manual"] > 0,
+                                   t["cajas_manual"] / (t["min_manual"] / 60), np.nan)
+    total = t["cajas_manual"] + t["cajas_pallet"]
+    t["pct_pallet"] = np.where(total > 0, t["cajas_pallet"] / total, np.nan)
     return t
 
 
 def resumen_zonas(listas, brechas):
     z = listas.groupby("zona").agg(
         listas=("id_de_lista", "size"), cajas=("cajas", "sum"), lineas=("lineas", "sum"),
-        min_efectivos=("dur_ef_min", "sum"), min_por_lista=("dur_min", "mean"),
+        lpns=("lpns", "sum"), min_efectivos=("dur_ef_min", "sum"), min_por_lista=("dur_min", "mean"),
     ).reset_index()
     # La espera antes de una lista se atribuye a la zona de esa lista
     esp = brechas[brechas["tipo"].isin(["Espera", "Pausa"])].groupby("zona")["brecha_min"].sum()
@@ -249,6 +287,7 @@ def resumen_zonas(listas, brechas):
     z["cj_h_efectiva"] = z["cajas"] / (z["min_efectivos"] / 60)
     z["cajas_por_lista"] = z["cajas"] / z["listas"]
     z["cajas_por_linea"] = np.where(z["lineas"] > 0, z["cajas"] / z["lineas"], np.nan)
+    z["min_por_lpn"] = z["min_efectivos"] / z["lpns"]
     return z.sort_values("cj_h_efectiva")
 
 
@@ -299,15 +338,15 @@ def generar_alertas(turnos, operarios, zonas, grua_semanal=None):
 
     hh = turnos["horas_hombre"].sum()
     if hh > 0:
-        prod = turnos["cajas"].sum() / hh
+        prod = turnos["cajas_manual"].sum() / hh
         if prod < cfg.META_ICEO:
             alertas.append(("error", f"Productividad total de {prod:.0f} cj/HH, bajo la meta ICEO de {cfg.META_ICEO}."))
         elif prod < cfg.META_ICEO * 1.05:
             alertas.append(("warning", f"Productividad total de {prod:.0f} cj/HH, apenas sobre la meta ICEO de {cfg.META_ICEO}."))
 
-        pct_ef = turnos["min_efectivos"].sum() / 60 / hh
+        pct_ef = turnos["min_manual"].sum() / 60 / hh
         if pct_ef < 0.6:
-            alertas.append(("warning", f"Solo el {pct_ef:.0%} de las horas-hombre se usan dentro de listas."))
+            alertas.append(("warning", f"Solo el {pct_ef:.0%} de las horas-hombre de picking manual se usan dentro de listas."))
 
     esperas = turnos["min_espera"].sum() + turnos["min_pausa"].sum()
     if esperas > 0:

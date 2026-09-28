@@ -86,32 +86,49 @@ def clasificar_tipo(zona: pd.Series) -> pd.Series:
 def preparar_picking(df: pd.DataFrame):
     """Limpia CAJA_PICKEADA y la deja a nivel de lista.
 
-    Devuelve (listas, exclusiones, avisos).
+    Devuelve (listas, exclusiones, avisos, totales). Cada exclusión informa registros y cajas
+    por nivel de LPN (S = surtido, L = pallet completo); totales son las cajas del archivo
+    original por nivel, para conciliar con lo que muestra la app.
     """
     _validar_columnas(df, COLS_PICKING, "picking")
     exclusiones, avisos = [], []
 
+    d = df.copy()
+    d["cajas"] = pd.to_numeric(d["cajas"].str.strip(), errors="coerce").fillna(0)
+    d["lineas"] = pd.to_numeric(d["lineas"].str.strip(), errors="coerce").fillna(0)
+    tiene_nivel = "nivel_lpn" in d.columns
+    if tiene_nivel:
+        d["nivel"] = d["nivel_lpn"].fillna("").str.strip().str.upper().replace("", "S")
+    else:
+        d["nivel"] = np.where(clasificar_tipo(d["zona_de_trabajo"].fillna("")) == PALLET, "L", "S")
+    d["cajas_s"] = np.where(d["nivel"] == "L", 0, d["cajas"])
+    d["cajas_l"] = np.where(d["nivel"] == "L", d["cajas"], 0)
+    totales = {"cajas_s": float(d["cajas_s"].sum()), "cajas_l": float(d["cajas_l"].sum()),
+               "registros": len(d)}
+
     def excluir(mask, motivo):
         n = int(mask.sum())
         if n:
-            exclusiones.append({"motivo": motivo, "registros": n})
-        return n
+            sub = d_ref[mask]
+            exclusiones.append({"motivo": motivo, "registros": n,
+                                "cajas_s": float(sub["cajas_s"].sum()),
+                                "cajas_l": float(sub["cajas_l"].sum())})
 
-    d = df.copy()
-    antes = len(d)
-    clave = ["id_de_lista", "lpn"] if "lpn" in d.columns else None
-    d = d.drop_duplicates(subset=clave)
-    if antes - len(d):
-        exclusiones.append({"motivo": "Filas duplicadas (misma lista y LPN)",
-                            "registros": antes - len(d)})
+    # Solo filas 100% idénticas: una misma lista puede traer el mismo LPN en más de una fila
+    dup = d.duplicated(subset=[c for c in df.columns])
+    d_ref = d
+    excluir(dup, "Filas duplicadas idénticas")
+    d = d[~dup].copy()
 
     d["inicio"] = pd.to_datetime(d["h_inicio"].str.strip(), format="%d/%m/%Y %H:%M", errors="coerce")
     d["termino"] = pd.to_datetime(d["h_termino"].str.strip(), format="%d/%m/%Y %H:%M", errors="coerce")
+    d_ref = d
     m = d["inicio"].isna() | d["termino"].isna()
     excluir(m, "Hora de inicio o término vacía o con formato inválido")
-    d = d[~m]
+    d = d[~m].copy()
 
     d["usuario"] = d["id_de_usuario_ultima_recogida"].fillna("").str.strip()
+    d_ref = d
     m = d["usuario"] == ""
     excluir(m, "Sin usuario")
     d = d[~m].copy()
@@ -119,27 +136,26 @@ def preparar_picking(df: pd.DataFrame):
     d["nombre"] = d["descripcion_usuario"].fillna("").str.strip()
     d.loc[d["nombre"] == "", "nombre"] = d["usuario"]
     d["zona"] = d["zona_de_trabajo"].fillna("").str.strip().replace("", "Sin zona")
-    for c in ("cajas", "lineas"):
-        d[c] = pd.to_numeric(d[c].str.strip(), errors="coerce").fillna(0)
+    d["es_pallet"] = d["nivel"] == "L"
+    d["lineas_s"] = np.where(d["es_pallet"], 0, d["lineas"])
 
     agregaciones = dict(
         usuario=("usuario", "first"), nombre=("nombre", "first"), zona=("zona", "first"),
         inicio=("inicio", "min"), termino=("termino", "max"),
-        cajas=("cajas", "sum"), lineas=("lineas", "sum"), lpns=("usuario", "size"),
+        cajas=("cajas", "sum"), cajas_s=("cajas_s", "sum"), cajas_l=("cajas_l", "sum"),
+        lineas=("lineas", "sum"), lineas_s=("lineas_s", "sum"),
+        lpns=("usuario", "size"), lpns_pallet=("es_pallet", "sum"),
     )
-    tiene_nivel = "nivel_lpn" in d.columns
-    if tiene_nivel:
-        # Nivel del LPN: L = pallet completo, S = surtido (picking de cajas)
-        d["es_pallet"] = d["nivel_lpn"].fillna("").str.strip().str.upper() == "L"
-        agregaciones["lpns_pallet"] = ("es_pallet", "sum")
     if "numero_de_viaje" in d.columns:
         agregaciones["viaje"] = ("numero_de_viaje", "first")
     listas = d.groupby("id_de_lista", as_index=False).agg(**agregaciones)
 
     listas["dur_min"] = (listas["termino"] - listas["inicio"]).dt.total_seconds() / 60
+    d_ref = listas
     m = listas["dur_min"] < 0
     excluir(m, "Término anterior al inicio (listas)")
-    listas = listas[~m]
+    listas = listas[~m].copy()
+    d_ref = listas
     m = listas["dur_min"] > cfg.DURACION_MAX_LISTA_MIN
     excluir(m, f"Duración mayor a {cfg.DURACION_MAX_LISTA_MIN} min (listas)")
     listas = listas[~m].copy()
@@ -152,29 +168,42 @@ def preparar_picking(df: pd.DataFrame):
         )
     listas["dur_ef_min"] = listas["dur_min"].clip(lower=cfg.DURACION_MIN_LISTA_MIN)
 
-    if tiene_nivel:
-        mixtas = int(((listas["lpns_pallet"] > 0) & (listas["lpns_pallet"] < listas["lpns"])).sum())
-        if mixtas:
-            avisos.append(f"{mixtas} listas mezclan LPN de pallet completo (L) y de surtido (S); "
-                          "se clasificaron según la mayoría.")
-        listas["tipo_picking"] = np.where(listas["lpns_pallet"] > listas["lpns"] / 2, PALLET, MANUAL)
-    else:
+    mixtas = int(((listas["lpns_pallet"] > 0) & (listas["lpns_pallet"] < listas["lpns"])).sum())
+    if mixtas:
+        avisos.append(f"{mixtas} listas mezclan LPN de pallet completo (L) y de surtido (S). Sus cajas se "
+                      "cuentan por nivel de LPN; su tiempo se asigna al tipo mayoritario.")
+    if not tiene_nivel:
         avisos.append("El archivo no trae la columna nivel_lpn: el pallet completo se identificó "
                       "por el nombre de la zona (config.PREFIJOS_PALLET_COMPLETO).")
-        listas["tipo_picking"] = clasificar_tipo(listas["zona"])
+    listas["tipo_picking"] = np.where(listas["lpns_pallet"] > listas["lpns"] / 2, PALLET, MANUAL)
     listas["turno"], listas["fecha_op"] = asignar_turno(listas["inicio"])
     n_sin = int((listas["turno"] == "Sin turno").sum())
     if n_sin:
         avisos.append(f"{n_sin} listas empiezan fuera de los turnos definidos en config.py.")
 
-    return listas.reset_index(drop=True), exclusiones, avisos
+    return listas.reset_index(drop=True), exclusiones, avisos, totales
+
+
+def conciliar(totales, exclusiones, listas, en_alcance) -> pd.DataFrame:
+    """Cuadratura de cajas: archivo original -> exclusiones -> fuera de alcance -> lo que usa la app."""
+    filas = [{"concepto": "Cajas en el archivo (todas las fechas y turnos)",
+              "surtido_S": totales["cajas_s"], "pallet_L": totales["cajas_l"]}]
+    for e in exclusiones:
+        filas.append({"concepto": f"(-) {e['motivo']}", "surtido_S": -e["cajas_s"], "pallet_L": -e["cajas_l"]})
+    fuera = listas[~en_alcance]
+    filas.append({"concepto": "(-) Otras fechas o turnos (fuera del período y turno elegidos)",
+                  "surtido_S": -fuera["cajas_s"].sum(), "pallet_L": -fuera["cajas_l"].sum()})
+    dentro = listas[en_alcance]
+    filas.append({"concepto": "(=) Cajas que usa la app en el período y turno elegidos",
+                  "surtido_S": dentro["cajas_s"].sum(), "pallet_L": dentro["cajas_l"].sum()})
+    return pd.DataFrame(filas)
 
 
 def preparar_lpns(df: pd.DataFrame):
     """Detalle por LPN (cajas, líneas, nivel L/S). None si el archivo no trae nivel_lpn o lpn."""
     if not {"lpn", "nivel_lpn"}.issubset(df.columns):
         return None
-    d = df.drop_duplicates(subset=["id_de_lista", "lpn"]).copy()
+    d = df.drop_duplicates().copy()
     d["inicio"] = pd.to_datetime(d["h_inicio"].str.strip(), format="%d/%m/%Y %H:%M", errors="coerce")
     d = d[d["inicio"].notna()].copy()
     d["nivel"] = d["nivel_lpn"].fillna("").str.strip().str.upper()
@@ -245,14 +274,15 @@ TIPOS_MIN = ["min_normal", "min_espera", "min_pausa", "min_colacion"]
 
 def _por_tipo(listas, claves):
     """Listas, cajas y minutos separados en manual y pallet completo."""
-    partes = []
+    # Las cajas se cuentan por nivel de LPN (S/L) en todas las listas, así una lista mixta no
+    # pierde cajas; listas, minutos y operarios se asignan según el tipo mayoritario de la lista.
+    partes = [listas.groupby(claves).agg(
+        cajas_manual=("cajas_s", "sum"), cajas_pallet=("cajas_l", "sum"),
+        lineas_manual=("lineas_s", "sum"), lpns_pallet=("lpns_pallet", "sum"))]
     for tipo, suf in ((MANUAL, "manual"), (PALLET, "pallet")):
         sub = listas[listas["tipo_picking"] == tipo]
         partes.append(sub.groupby(claves).agg(**{
             f"listas_{suf}": ("id_de_lista", "size"),
-            f"cajas_{suf}": ("cajas", "sum"),
-            f"lineas_{suf}": ("lineas", "sum"),
-            f"lpns_{suf}": ("lpns", "sum"),
             f"min_{suf}": ("dur_ef_min", "sum"),
             f"operarios_{suf}": ("usuario", "nunique"),
         }))
@@ -321,9 +351,9 @@ def resumen_turnos(listas, brechas):
     return t
 
 
-def resumen_zonas(listas, brechas):
+def resumen_zonas(listas, brechas, col_cajas="cajas"):
     z = listas.groupby("zona").agg(
-        listas=("id_de_lista", "size"), cajas=("cajas", "sum"), lineas=("lineas", "sum"),
+        listas=("id_de_lista", "size"), cajas=(col_cajas, "sum"), lineas=("lineas", "sum"),
         lpns=("lpns", "sum"), min_efectivos=("dur_ef_min", "sum"), min_por_lista=("dur_min", "mean"),
     ).reset_index()
     # La espera antes de una lista se atribuye a la zona de esa lista

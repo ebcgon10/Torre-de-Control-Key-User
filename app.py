@@ -20,9 +20,9 @@ def fmt_num(x, dec=0):
 @st.cache_data(show_spinner="Procesando picking...")
 def cargar_picking(contenidos: tuple):
     df = pd.concat([proc.leer_csv(c) for c in contenidos], ignore_index=True)
-    listas, exclusiones, avisos = proc.preparar_picking(df)
+    listas, exclusiones, avisos, totales = proc.preparar_picking(df)
     brechas = proc.calcular_brechas(listas)
-    return listas, brechas, exclusiones, avisos, proc.preparar_lpns(df)
+    return listas, brechas, exclusiones, avisos, proc.preparar_lpns(df), totales
 
 
 @st.cache_data(show_spinner="Procesando movimientos de grúa...")
@@ -137,7 +137,7 @@ if not contenidos_pick:
     st.stop()
 
 try:
-    listas, brechas, exclusiones, avisos, lpns = cargar_picking(contenidos_pick)
+    listas, brechas, exclusiones, avisos, lpns, totales = cargar_picking(contenidos_pick)
 except ValueError as e:
     st.error(str(e))
     st.stop()
@@ -173,10 +173,13 @@ if not isinstance(rango, tuple) or len(rango) != 2:
 desde, hasta = pd.Timestamp(rango[0]), pd.Timestamp(rango[1])
 
 
+def en_alcance(df):
+    return (df["fecha_op"].between(desde, hasta) & df["turno"].isin(cfg.TURNOS_ANALIZADOS)
+            & ~df["zona"].isin(cfg.ZONAS_EXCLUIDAS))
+
+
 def filtrar(df):
-    m = (df["fecha_op"].between(desde, hasta) & df["turno"].isin(cfg.TURNOS_ANALIZADOS)
-         & ~df["zona"].isin(cfg.ZONAS_EXCLUIDAS))
-    return df[m]
+    return df[en_alcance(df)]
 
 
 L, B = filtrar(listas), filtrar(brechas)
@@ -191,8 +194,8 @@ turnos = proc.resumen_turnos(L, B)
 turnos["pct_pallet_pct"] = turnos["pct_pallet"] * 100
 L_man = L[L["tipo_picking"] == proc.MANUAL]
 L_pal = L[L["tipo_picking"] == proc.PALLET]
-zonas = proc.resumen_zonas(L_man, B)
-zonas_pallet = proc.resumen_zonas(L_pal, B)
+zonas = proc.resumen_zonas(L_man, B, "cajas_s")
+zonas_pallet = proc.resumen_zonas(L_pal, B, "cajas_l")
 
 G, grua_sem = None, None
 if grua is not None:
@@ -214,7 +217,7 @@ with tab_res:
     prod_total = cajas / hh if hh else 0
     st.markdown("##### Picking manual")
     c = st.columns(5)
-    c[0].metric("Cajas pickeadas", fmt_num(cajas))
+    c[0].metric("Cajas pickeadas", fmt_num(cajas), help="Suma de cajas en LPN de surtido (nivel S).")
     c[1].metric("Operarios", int(L_man["usuario"].nunique()))
     c[2].metric("cj/HH total", fmt_num(prod_total),
                 delta=f"{fmt_num(prod_total - cfg.META_ICEO)} vs meta {cfg.META_ICEO}")
@@ -581,12 +584,25 @@ with tab_grua:
 
 # ---------------------------------------------------------------- calidad
 with tab_calidad:
+    st.subheader("Cuadratura de cajas")
+    st.caption("De las cajas del archivo a las que muestra la app en el período y turno elegidos. "
+               "Si no cuadra con tu planilla, esta tabla dice dónde está la diferencia.")
+    conc = proc.conciliar(totales, exclusiones, listas, en_alcance(listas))
+    st.dataframe(conc, hide_index=True, use_container_width=True, column_config={
+        "concepto": st.column_config.TextColumn("Concepto", width="large"),
+        "surtido_S": st.column_config.NumberColumn("Surtido (S)", format="%.0f"),
+        "pallet_L": st.column_config.NumberColumn("Pallet completo (L)", format="%.0f"),
+    })
+
     st.subheader("Calidad de los datos cargados")
     st.caption("Todo el archivo, sin filtros.")
     st.metric("Listas válidas", fmt_num(len(listas)))
     if exclusiones:
         st.markdown("**Registros excluidos**")
-        st.dataframe(pd.DataFrame(exclusiones), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(exclusiones), hide_index=True, use_container_width=True, column_config={
+            "motivo": "Motivo", "registros": "Registros",
+            "cajas_s": st.column_config.NumberColumn("Cajas S", format="%.0f"),
+            "cajas_l": st.column_config.NumberColumn("Cajas L", format="%.0f")})
     else:
         st.success("No se excluyó ningún registro.")
     for aviso in avisos:

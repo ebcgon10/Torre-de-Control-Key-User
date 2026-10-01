@@ -190,6 +190,8 @@ if L.empty:
 op_diario = proc.resumen_operarios(L, B)
 operarios = proc.consolidar_operarios(op_diario)
 operarios["utilizacion_pct"] = operarios["utilizacion"] * 100
+operarios["vs_meta"] = operarios["cj_hh_total"] - cfg.META_ICEO
+operarios = operarios.sort_values("cj_hh_total", ascending=False)
 turnos = proc.resumen_turnos(L, B)
 turnos["pct_pallet_pct"] = turnos["pct_pallet"] * 100
 L_man = L[L["tipo_picking"] == proc.MANUAL]
@@ -288,7 +290,8 @@ with tab_op:
 
     st.dataframe(
         operarios[["nombre", "turnos", "listas_manual", "cajas_manual", "listas_pallet", "cajas_pallet",
-                   "horas_efectivas", "horas_disponibles", "utilizacion_pct", "cj_h_manual",
+                   "cj_hh_total", "vs_meta", "horas_turno", "horas_efectivas", "horas_disponibles",
+                   "utilizacion_pct", "cj_h_manual",
                    "min_espera", "min_pausa", "min_inicio_tardio"]],
         hide_index=True, use_container_width=True,
         column_config={
@@ -301,9 +304,15 @@ with tab_op:
             "cajas_manual": "Cajas manual",
             "listas_pallet": "Listas pallet",
             "cajas_pallet": "Cajas pallet",
+            "cj_hh_total": st.column_config.NumberColumn(
+                "cj/HH total", format="%.0f",
+                help="Cajas de surtido ÷ horas del turno (ventana de picking manual, de la primera a la "
+                     "última lista del turno). Mismo cálculo que el cj/HH total del Resumen y del Power BI."),
+            "vs_meta": st.column_config.NumberColumn(f"vs meta {cfg.META_ICEO}", format="%+.0f"),
+            "horas_turno": st.column_config.NumberColumn("Horas turno", format="%.2f"),
             "cj_h_manual": st.column_config.NumberColumn(
-                "cj/h manual", format="%.0f",
-                help="Cajas de picking manual por hora dentro de listas manuales."),
+                "cj/h en listas", format="%.0f",
+                help="Cajas de surtido por hora dentro de listas manuales (productividad efectiva)."),
             "min_espera": st.column_config.NumberColumn("Min. espera", format="%.0f"),
             "min_pausa": st.column_config.NumberColumn("Min. pausa", format="%.0f"),
             "min_inicio_tardio": st.column_config.NumberColumn(
@@ -385,8 +394,9 @@ with tab_tiempo:
     st.subheader("Tiempo entre listas")
     st.caption(f"Normal: menos de {cfg.UMBRAL_ESPERA_MIN} min. Espera: {cfg.UMBRAL_ESPERA_MIN} a "
                f"{cfg.UMBRAL_PAUSA_MIN} min. Pausa: más de {cfg.UMBRAL_PAUSA_MIN} min. "
-               f"Colación: la pausa más larga de cada operario entre {cfg.COLACION_MIN_MIN} y "
-               f"{cfg.COLACION_MAX_MIN} min.")
+               + " ".join(f"Colación {t}: hasta {c['minutos']} min sin listas entre {c['ventana'][0]} y "
+                          f"{c['ventana'][1]}; si el operario se demora más, el exceso cuenta como espera o pausa."
+                          for t, c in cfg.COLACION_POR_TURNO.items()))
     if B.empty:
         st.info("No hay tiempos entre listas para los filtros elegidos.")
     else:

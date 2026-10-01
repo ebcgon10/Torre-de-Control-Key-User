@@ -46,9 +46,18 @@ ZONAS_EXCLUIDAS = []
 UMBRAL_ESPERA_MIN = 5    # bajo esto: normal (traslado, tomar la siguiente lista)
 UMBRAL_PAUSA_MIN = 15    # entre espera y pausa: espera; sobre esto: pausa
 
-# Colación: en cada operario y turno, la pausa más larga dentro de este rango
-# se marca como colación y no se cuenta como tiempo perdido.
-DESCONTAR_COLACION = True
+# Colación con horario fijo por turno: ventana en que los operarios salen a colación
+# (en TC hay dos grupos: 01:30-02:00 y 02:00-02:30) y minutos que le corresponden a cada uno.
+# El tiempo sin listas dentro de la ventana, hasta esos minutos, se cuenta como colación.
+COLACION_POR_TURNO = {
+    "TC": {"ventana": ("01:30", "02:30"), "minutos": 30},
+}
+
+# Solo huecos de al menos estos minutos se consideran salida a colación
+COLACION_BRECHA_MINIMA_MIN = 10
+
+# Turnos sin colación configurada arriba: la pausa más larga de cada operario dentro de
+# este rango se toma como colación.
 COLACION_MIN_MIN = 25
 COLACION_MAX_MIN = 60
 

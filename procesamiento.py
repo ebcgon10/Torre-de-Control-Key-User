@@ -230,25 +230,69 @@ def surtido_casi_pallet(lpns: pd.DataFrame) -> pd.DataFrame:
     return z[z["lpns_casi_pallet"] > 0].sort_values("cajas_casi_pallet", ascending=False)
 
 
+def _clasificar(minutos: pd.Series) -> np.ndarray:
+    return np.select([minutos < cfg.UMBRAL_ESPERA_MIN, minutos < cfg.UMBRAL_PAUSA_MIN],
+                     ["Normal", "Espera"], default="Pausa")
+
+
+def _ventana_colacion(b: pd.DataFrame, turno: str):
+    """Inicio y fin (datetime) de la ventana de colación del turno, para cada brecha."""
+    ini, fin = cfg.COLACION_POR_TURNO[turno]["ventana"]
+    inicio_turno = dict((t, _minutos(i)) for t, i, _ in cfg.TURNOS).get(turno, 0)
+    desfase = pd.Timedelta(days=1) if _minutos(ini) < inicio_turno else pd.Timedelta(0)
+    base = b["fecha_op"] + desfase
+    return (base + pd.Timedelta(minutes=_minutos(ini)), base + pd.Timedelta(minutes=_minutos(fin)))
+
+
 def calcular_brechas(listas: pd.DataFrame) -> pd.DataFrame:
-    """Tiempo entre el fin de una lista y el inicio de la siguiente, por operario y turno."""
+    """Tiempo entre el fin de una lista y el inicio de la siguiente, por operario y turno.
+
+    En turnos con colación configurada (config.COLACION_POR_TURNO), la parte de cada brecha que
+    cae dentro de la ventana de colación se marca como Colación, hasta los minutos que le
+    corresponden a cada operario; el resto de esa brecha se clasifica como Normal, Espera o
+    Pausa según lo que dure. Una brecha puede quedar partida en dos filas.
+    En turnos sin colación configurada, la pausa más larga entre COLACION_MIN_MIN y
+    COLACION_MAX_MIN se toma como colación.
+    """
     d = listas.sort_values(CLAVE_OPERARIO + ["inicio"]).copy()
     d["fin_anterior"] = d.groupby(CLAVE_OPERARIO)["termino"].shift()
     b = d[d["fin_anterior"].notna()].copy()
     b["brecha_min"] = (b["inicio"] - b["fin_anterior"]).dt.total_seconds() / 60
     b["solapada"] = b["brecha_min"] < 0
     b["brecha_min"] = b["brecha_min"].clip(lower=0)
-    b["tipo"] = np.select(
-        [b["brecha_min"] < cfg.UMBRAL_ESPERA_MIN, b["brecha_min"] < cfg.UMBRAL_PAUSA_MIN],
-        ["Normal", "Espera"], default="Pausa",
-    )
-    if cfg.DESCONTAR_COLACION:
-        cand = b[(b["tipo"] == "Pausa")
-                 & b["brecha_min"].between(cfg.COLACION_MIN_MIN, cfg.COLACION_MAX_MIN)]
-        if len(cand):
-            idx = cand.groupby(CLAVE_OPERARIO)["brecha_min"].idxmax()
-            b.loc[idx, "tipo"] = "Colación"
+    b["colacion_min"] = 0.0
+
+    for turno, conf in cfg.COLACION_POR_TURNO.items():
+        m = b["turno"] == turno
+        if not m.any():
+            continue
+        v_ini, v_fin = _ventana_colacion(b[m], turno)
+        desde = np.maximum(b.loc[m, "fin_anterior"], v_ini)
+        hasta = np.minimum(b.loc[m, "inicio"], v_fin)
+        traslape = ((hasta - desde).dt.total_seconds() / 60).clip(lower=0)
+        # Huecos cortos (traslados normales) no cuentan como colación aunque caigan en la ventana
+        traslape = traslape.where(b.loc[m, "brecha_min"] >= cfg.COLACION_BRECHA_MINIMA_MIN, 0)
+        # Cada operario tiene derecho a conf["minutos"] de colación dentro de la ventana
+        previo = traslape.groupby([b.loc[m, c] for c in CLAVE_OPERARIO]).cumsum() - traslape
+        b.loc[m, "colacion_min"] = np.minimum(traslape, (conf["minutos"] - previo).clip(lower=0))
+
+    b["resto_min"] = b["brecha_min"] - b["colacion_min"]
+    b["tipo"] = _clasificar(b["resto_min"])
+
+    col = b[b["colacion_min"] > 0].copy()
+    col["brecha_min"], col["tipo"], col["solapada"] = col["colacion_min"], "Colación", False
+    resto = b[(b["colacion_min"] == 0) | (b["resto_min"] > 0)].copy()
+    resto["brecha_min"] = resto["resto_min"]
+    b = pd.concat([resto, col])
+
+    sin_conf = ~b["turno"].isin(list(cfg.COLACION_POR_TURNO))
+    cand = b[sin_conf & (b["tipo"] == "Pausa")
+             & b["brecha_min"].between(cfg.COLACION_MIN_MIN, cfg.COLACION_MAX_MIN)]
+    if len(cand):
+        b.loc[cand.groupby(CLAVE_OPERARIO)["brecha_min"].idxmax(), "tipo"] = "Colación"
+
     b["hora"] = b["fin_anterior"].dt.hour
+    b = b.sort_values(CLAVE_OPERARIO + ["fin_anterior"]).reset_index(drop=True)
     return b[CLAVE_OPERARIO + ["nombre", "zona", "id_de_lista", "fin_anterior", "inicio",
                                "brecha_min", "tipo", "solapada", "hora"]]
 
@@ -301,6 +345,12 @@ def resumen_operarios(listas, brechas):
 
     inicio_turno = listas.groupby(["fecha_op", "turno"])["inicio"].min().rename("inicio_turno")
     op = op.join(inicio_turno, on=["fecha_op", "turno"])
+    # Horas-hombre de cada operario = ventana de picking manual de su turno, igual que el Power BI
+    man = listas[listas["tipo_picking"] == MANUAL]
+    ventana = man.groupby(["fecha_op", "turno"]).agg(i=("inicio", "min"), f=("termino", "max"))
+    ventana = ((ventana["f"] - ventana["i"]).dt.total_seconds() / 3600).rename("horas_turno")
+    op = op.join(ventana, on=["fecha_op", "turno"])
+    op["horas_turno"] = op["horas_turno"].fillna(0)
     op["min_inicio_tardio"] = (op["primera"] - op["inicio_turno"]).dt.total_seconds() / 60
     op["min_en_piso"] = (op["ultima"] - op["primera"]).dt.total_seconds() / 60
     op["min_disponibles"] = (op["min_en_piso"] - op["min_colacion"]).clip(lower=0)
@@ -316,7 +366,9 @@ def consolidar_operarios(op):
         min_manual=("min_manual", "sum"), min_efectivos=("min_efectivos", "sum"),
         min_disponibles=("min_disponibles", "sum"), min_espera=("min_espera", "sum"),
         min_pausa=("min_pausa", "sum"), min_inicio_tardio=("min_inicio_tardio", "mean"),
+        horas_turno=("horas_turno", "sum"),
     ).reset_index()
+    g["cj_hh_total"] = np.where(g["horas_turno"] > 0, g["cajas_manual"] / g["horas_turno"], np.nan)
     g["horas_efectivas"] = g["min_efectivos"] / 60
     g["horas_disponibles"] = g["min_disponibles"] / 60
     g["utilizacion"] = np.where(g["min_disponibles"] > 0,

@@ -70,4 +70,5 @@ DURACION_MIN_LISTA_MIN = 0.5
 
 # Alertas
 UMBRAL_UTILIZACION = 0.50      # operario con menos % de su tiempo en listas
-UMBRAL_NO_DIRIGIDO = 0.50      # % de movimientos de grúa no dirigidos
+UMBRAL_NO_DIRIGIDO = 0.50          # % de movimientos de grúa no dirigidos
+UMBRAL_CUMPLIMIENTO_PALLET = 0.85  # alerta si sale como pallet completo menos de este % de lo esperado

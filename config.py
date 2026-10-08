@@ -22,6 +22,15 @@ UMBRAL_LPN_CASI_PALLET = 50
 # Días de la semana sin picking (0 = lunes ... 6 = domingo). La venta del sábado se pickea el lunes.
 DIAS_SIN_PICKING = [6]
 
+# Carpetas de Drive (dentro de la carpeta raíz) de las que lee esta app. La raíz
+# "TORRE DE CONTROL WMS" la comparten Coquimbo y Puerto Montt: sin este filtro cada app
+# mezclaría los archivos del otro CD. Los archivos sueltos en la raíz no se leen.
+CARPETAS_DRIVE = [
+    "01_ENTRADA",
+    "DATOS WMS",
+    "VENTAS MENSUALES",
+]
+
 # Posiciones de picking
 PATRON_VENTA = "VENTA"                    # archivos de venta (CSV recomendado; Excel es lento)
 PATRON_MAESTRO = "DATOS PARA ARMAR"

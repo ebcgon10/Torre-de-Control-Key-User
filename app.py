@@ -90,6 +90,9 @@ with st.sidebar:
         except Exception as e:  # credenciales, permisos o red
             st.error(f"No pude leer la carpeta de Drive: {e}")
             st.stop()
+        carpetas_ok = [c.strip().upper() for c in getattr(cfg, "CARPETAS_DRIVE", [])]
+        if carpetas_ok:
+            archivos = [f for f in archivos if f["carpeta"].split("/")[0].strip().upper() in carpetas_ok]
         es_csv = lambda f: f["name"].lower().endswith(".csv")
         a_pick = [f for f in archivos if nombre_norm(cfg.PATRON_PICKING) in nombre_norm(f["name"]) and es_csv(f)]
         a_grua = [f for f in archivos if nombre_norm(cfg.PATRON_GRUA) in nombre_norm(f["name"]) and es_csv(f)]
@@ -109,6 +112,8 @@ with st.sidebar:
             if a_factor:
                 factor_pallet = (bajar_drive(cred, a_factor[0]["id"], a_factor[0]["modifiedTime"]),
                                  a_factor[0]["name"])
+        if carpetas_ok:
+            st.caption(f"{cfg.CD_NOMBRE if hasattr(cfg, 'CD_NOMBRE') else ''} · carpetas: {', '.join(cfg.CARPETAS_DRIVE)}")
         st.caption(f"En Drive: {len(a_pick)} de picking, {len(a_grua)} de grúa, {len(a_venta)} de venta, "
                    f"{len(a_maestro)} maestro de ubicaciones y {len(a_factor)} de cajas por pallet. "
                    "La lista se refresca sola cada hora o con el botón.")

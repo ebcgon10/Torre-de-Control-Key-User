@@ -87,7 +87,7 @@ UMBRAL_CUMPLIMIENTO_PALLET = 0.85  # alerta si sale como pallet completo menos d
 # Los usuarios que no estén en ninguna lista aparecen como "Otros usuarios".
 GRUEROS = [
     "ALPIZAR", "ARENESPICA", "CARIVE", "DANASTU", "GRUEE_1", "GRUEE_2", "GRUEE_3", "GRUEE_4",
-    "HECZEPP", "HEFRZEPEFL", "JCASTILLOM", "JORIVE", "JORODIAZRO", "LBARRIAB", "LUALMIRAAR",
+    "HECZEPP", "HEFRZEPEFL", "JCASTILLOM", "JORIVE", "JORODIAZRO", "LBARRIAB", "LUALMIRAAR", "MARIOTAP",
     "RAEMBRIZAV", "ROANRIOSGO",
 ]
 SUPERVISORES = [

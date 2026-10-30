@@ -8,7 +8,7 @@ import procesamiento as proc
 st.set_page_config(page_title="Torre de control WMS", page_icon="🏭", layout="wide")
 
 VERDE = "#1F5F4A"
-COLORES_TIPO = {"Normal": "#9DB8AE", "Espera": "#E0A526", "Pausa": "#C4452F", "Colación": "#8A8F98"}
+COLORES_TIPO = {"Normal": "#9DB8AE", "Pausa": "#C4452F", "Colación": "#8A8F98"}
 COLORES_GRUA = {"No dirigido": "#C4452F", "Reabastecimiento dirigido": VERDE,
                 "Recogida almacenamiento": "#6F8FAF", "Otro": "#B8BDC4"}
 
@@ -355,7 +355,7 @@ with tab_res:
 
     st.markdown("#### Detalle por turno")
     tabla(turnos[["fecha_op", "turno", "inicio", "fin", "operarios_manual", "listas_manual", "cajas_manual",
-                  "cj_hh_total", "cj_hh_efectiva", "cajas_pallet", "pct_pallet_pct", "min_espera", "min_pausa"]],
+                  "cj_hh_total", "cj_hh_efectiva", "cajas_pallet", "pct_pallet_pct", "min_colacion", "min_pausa"]],
           column_config={
               "fecha_op": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
               "turno": "Turno",
@@ -367,8 +367,13 @@ with tab_res:
               "pct_pallet_pct": st.column_config.NumberColumn("% pallet completo", format="%.1f%%"),
               "cj_hh_total": st.column_config.NumberColumn("cj/HH total", format="%.0f"),
               "cj_hh_efectiva": st.column_config.NumberColumn("cj/HH efectiva", format="%.0f"),
-              "min_espera": st.column_config.NumberColumn("Min. espera", format="%.0f"),
-              "min_pausa": st.column_config.NumberColumn("Min. pausa", format="%.0f"),
+              "min_colacion": st.column_config.NumberColumn(
+                  "Min. colación", format="%.0f",
+                  help="Minutos sin listas dentro de la ventana de colación del turno."),
+              "min_pausa": st.column_config.NumberColumn(
+                  "Min. pausa", format="%.0f",
+                  help=f"Minutos sin listas durante la operación, fuera de la colación "
+                       f"(huecos de {cfg.UMBRAL_PAUSA_MIN} min o más)."),
           })
 
     # ---------------- operarios
@@ -378,7 +383,7 @@ with tab_res:
                "minutos entre su primera y última lista, descontando colación. Ordenado por cj/HH total.")
     tabla(operarios[["nombre", "turnos", "listas_manual", "cajas_manual", "cj_hh_total", "vs_meta", "horas_turno",
                      "listas_pallet", "cajas_pallet", "horas_efectivas", "horas_disponibles", "utilizacion_pct",
-                     "cj_h_manual", "min_espera", "min_pausa", "min_inicio_tardio"]],
+                     "cj_h_manual", "min_colacion", "min_pausa", "min_inicio_tardio"]],
           column_config={
               "nombre": "Operario", "turnos": "Turnos",
               "listas_manual": "Listas manual", "cajas_manual": st.column_config.NumberColumn("Cajas manual", format="%.0f"),
@@ -393,8 +398,13 @@ with tab_res:
               "utilizacion_pct": st.column_config.ProgressColumn("Utilización", format="%.0f%%",
                                                                  min_value=0, max_value=100),
               "cj_h_manual": st.column_config.NumberColumn("cj/h en listas", format="%.0f"),
-              "min_espera": st.column_config.NumberColumn("Min. espera", format="%.0f"),
-              "min_pausa": st.column_config.NumberColumn("Min. pausa", format="%.0f"),
+              "min_colacion": st.column_config.NumberColumn(
+                  "Min. colación", format="%.0f",
+                  help="Minutos sin listas dentro de la ventana de colación del turno."),
+              "min_pausa": st.column_config.NumberColumn(
+                  "Min. pausa", format="%.0f",
+                  help=f"Minutos sin listas durante la operación, fuera de la colación "
+                       f"(huecos de {cfg.UMBRAL_PAUSA_MIN} min o más)."),
               "min_inicio_tardio": st.column_config.NumberColumn(
                   "Inicio tardío (min)", format="%.0f",
                   help="Minutos entre la primera lista del turno y la primera lista del operario."),
@@ -410,7 +420,7 @@ with tab_res:
     fig.add_hline(y=cfg.META_ICEO, line_dash="dash", line_color="#C4452F", annotation_text=f"Meta ICEO {cfg.META_ICEO}")
     st.plotly_chart(fig, use_container_width=True)
     tabla(zonas[["zona", "listas", "cajas", "lineas", "cj_h_efectiva", "min_por_lista", "cajas_por_lista",
-                 "cajas_por_linea", "min_espera_antes"]],
+                 "cajas_por_linea", "min_pausa_antes"]],
           column_config={
               "zona": "Zona", "listas": "Listas", "cajas": st.column_config.NumberColumn("Cajas", format="%.0f"),
               "lineas": st.column_config.NumberColumn("Líneas", format="%.0f"),
@@ -418,7 +428,7 @@ with tab_res:
               "min_por_lista": st.column_config.NumberColumn("Min. por lista", format="%.1f"),
               "cajas_por_lista": st.column_config.NumberColumn("Cajas por lista", format="%.1f"),
               "cajas_por_linea": st.column_config.NumberColumn("Cajas por línea", format="%.1f"),
-              "min_espera_antes": st.column_config.NumberColumn("Min. espera previa", format="%.0f"),
+              "min_pausa_antes": st.column_config.NumberColumn("Min. pausa previa", format="%.0f"),
           })
 
     st.markdown("#### Pallets armados en surtido")
@@ -455,64 +465,121 @@ with tab_res:
     # ---------------- tiempo no efectivo
     st.divider()
     st.subheader("Tiempo no efectivo")
-    st.caption(f"Normal: menos de {cfg.UMBRAL_ESPERA_MIN} min entre listas. Espera: {cfg.UMBRAL_ESPERA_MIN} a "
-               f"{cfg.UMBRAL_PAUSA_MIN} min. Pausa: más de {cfg.UMBRAL_PAUSA_MIN} min. "
-               + " ".join(f"Colación {t}: hasta {c['minutos']} min sin listas entre {c['ventana'][0]} y "
-                          f"{c['ventana'][1]}; si el operario se demora más, el exceso cuenta como espera o pausa."
-                          for t, c in cfg.COLACION_POR_TURNO.items()))
+    st.caption(f"Colación: todo el tiempo sin listas dentro de la ventana de colación ("
+               + "; ".join(f"{t} {c['ventana'][0]}-{c['ventana'][1]}" for t, c in cfg.COLACION_POR_TURNO.items())
+               + f"). Pausa: tiempo sin listas fuera de esa ventana, en huecos de {cfg.UMBRAL_PAUSA_MIN} min o "
+               f"más. Normal: huecos de menos de {cfg.UMBRAL_PAUSA_MIN} min (traslado a la siguiente lista).")
     if B.empty:
         st.info("No hay tiempos entre listas para el período elegido.")
     else:
-        resumen_tipo = B.groupby("tipo")["brecha_min"].agg(["sum", "count"]).reset_index()
-        c = st.columns(len(resumen_tipo))
-        for col, (_, r) in zip(c, resumen_tipo.iterrows()):
-            col.metric(r["tipo"], f"{fmt_num(r['sum'] / 60, 1)} h", f"{int(r['count'])} veces", delta_color="off")
-        por_hora = B.groupby(["hora", "tipo"])["brecha_min"].sum().reset_index()
-        fig = px.bar(por_hora, x="hora", y="brecha_min", color="tipo", color_discrete_map=COLORES_TIPO,
-                     category_orders={"tipo": ["Normal", "Espera", "Pausa", "Colación"]},
-                     labels={"hora": "Hora del día", "brecha_min": "Minutos-hombre", "tipo": ""})
+        BL = proc.brechas_por_tipo(B)
+        orden = ["Colación", "Pausa", "Normal"]
+        c = st.columns(len(orden))
+        for col, tipo in zip(c, orden):
+            sub = BL[BL["tipo"] == tipo]
+            col.metric(tipo, f"{fmt_num(sub['minutos'].sum() / 60, 1)} h", f"{len(sub)} veces", delta_color="off")
+        por_hora = BL.groupby(["hora", "tipo"])["minutos"].sum().reset_index()
+        fig = px.bar(por_hora, x="hora", y="minutos", color="tipo", color_discrete_map=COLORES_TIPO,
+                     category_orders={"tipo": orden},
+                     labels={"hora": "Hora del día", "minutos": "Minutos-hombre", "tipo": ""})
         fig.update_xaxes(dtick=1)
         st.plotly_chart(fig, use_container_width=True)
-        st.markdown("#### Esperas y pausas más largas")
-        top = B[B["tipo"].isin(["Espera", "Pausa"])].nlargest(15, "brecha_min")
-        tabla(top[["fecha_op", "nombre", "fin_anterior", "inicio", "brecha_min", "tipo", "zona"]],
+        st.markdown("#### Pausas más largas")
+        st.caption("Minutos = tiempo completo entre que terminó una lista y empezó la siguiente. Si el hueco "
+                   "pasa por la ventana de colación, se separa en minutos de colación y de pausa.")
+        top = B[B["min_pausa"] > 0].nlargest(15, "min_pausa")
+        tabla(top[["fecha_op", "nombre", "fin_anterior", "inicio", "brecha_min", "min_colacion", "min_pausa",
+                   "tipo", "zona"]],
               column_config={
                   "fecha_op": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
                   "nombre": "Operario",
                   "fin_anterior": st.column_config.DatetimeColumn("Terminó lista", format="HH:mm"),
                   "inicio": st.column_config.DatetimeColumn("Inició siguiente", format="HH:mm"),
                   "brecha_min": st.column_config.NumberColumn("Minutos", format="%.0f"),
+                  "min_colacion": st.column_config.NumberColumn("De colación", format="%.0f"),
+                  "min_pausa": st.column_config.NumberColumn("De pausa", format="%.0f"),
                   "tipo": "Tipo", "zona": "Zona siguiente lista",
               })
 
     # ---------------- grúa
     st.divider()
     st.subheader("Movimientos de grúa")
-    st.caption("El exporte de grúa no trae la hora: esta sección muestra el día completo (todos los turnos).")
     if G is None:
         st.info("Sube el archivo de movimientos de grúa para ver esta sección.")
-    elif G.empty:
-        st.info("No hay movimientos de grúa en el período elegido.")
     else:
-        total = G["movimientos"].sum()
-        nd = G.loc[G["tipo"] == "No dirigido", "movimientos"].sum()
-        rd = G.loc[G["tipo"] == "Reabastecimiento dirigido", "movimientos"].sum()
-        c = st.columns(3)
-        c[0].metric("Movimientos", fmt_num(total))
-        c[1].metric("No dirigidos", f"{nd / total:.0%}")
-        c[2].metric("Reabastecimiento dirigido", f"{rd / total:.0%}")
-        diario = G.groupby(["fecha", "tipo"])["movimientos"].sum().reset_index()
-        fig = px.bar(diario, x="fecha", y="movimientos", color="tipo", color_discrete_map=COLORES_GRUA,
-                     labels={"fecha": "", "movimientos": "Movimientos", "tipo": ""})
-        st.plotly_chart(fig, use_container_width=True)
-        fig = px.line(grua_sem, x="semana", y="pct_no_dirigido", markers=True, color_discrete_sequence=["#C4452F"],
-                      labels={"semana": "", "pct_no_dirigido": "% no dirigido"})
-        fig.update_layout(yaxis_tickformat=".0%", height=300)
-        st.plotly_chart(fig, use_container_width=True)
-        gu = proc.resumen_grua_usuarios(G)
-        gu["pct_no_dirigido"] = gu["pct_no_dirigido"] * 100
-        tabla(gu, column_config={"pct_no_dirigido": st.column_config.ProgressColumn(
-            "% no dirigido", format="%.0f%%", min_value=0, max_value=100)})
+        horarios = {n: f"{n} ({i} a {'00:00' if f == '24:00' else f})" for n, i, f in cfg.TURNOS}
+        turno_g = st.segmented_control(
+            "Turno", ["Todos"] + list(horarios), default="Todos", key="turno_grua",
+            format_func=lambda t: horarios.get(t, "Todos los turnos"))
+        turno_g = turno_g or "Todos"
+        con_hora = bool(grua["tiene_hora"].any())
+        if turno_g != "Todos" and not con_hora:
+            st.warning("El exporte de grúa cargado trae solo la fecha, sin hora: no se puede separar por turno. "
+                       "Exporta los movimientos con fecha y hora de transacción para usar este filtro.")
+        Gt, grua_t = G, grua
+        if turno_g != "Todos":
+            Gt, grua_t = G[G["turno"] == turno_g], grua[grua["turno"] == turno_g]
+            sin_hora = int((G["turno"] == "Sin hora").sum())
+            if con_hora and sin_hora:
+                st.caption(f"{sin_hora} registros del período no traen hora y quedan fuera del filtro de turno.")
+        else:
+            st.caption("Todos los turnos del día.")
+        if Gt.empty:
+            st.info("No hay movimientos de grúa para el período y turno elegidos.")
+        else:
+            total = Gt["movimientos"].sum()
+            nd = Gt.loc[Gt["tipo"] == "No dirigido", "movimientos"].sum()
+            rd = Gt.loc[Gt["tipo"] == "Reabastecimiento dirigido", "movimientos"].sum()
+            c = st.columns(3)
+            c[0].metric("Movimientos", fmt_num(total))
+            c[1].metric("No dirigidos", f"{nd / total:.0%}")
+            c[2].metric("Reabastecimiento dirigido", f"{rd / total:.0%}")
+            diario = Gt.groupby(["fecha", "tipo"])["movimientos"].sum().reset_index()
+            fig = px.bar(diario, x="fecha", y="movimientos", color="tipo", color_discrete_map=COLORES_GRUA,
+                         labels={"fecha": "", "movimientos": "Movimientos", "tipo": ""})
+            st.plotly_chart(fig, use_container_width=True)
+            sem_t = proc.resumen_grua_semanal(grua_t[grua_t["fecha"] <= hasta])
+            fig = px.line(sem_t, x="semana", y="pct_no_dirigido", markers=True,
+                          color_discrete_sequence=["#C4452F"],
+                          labels={"semana": "", "pct_no_dirigido": "% no dirigido"})
+            fig.update_layout(yaxis_tickformat=".0%", height=300)
+            st.plotly_chart(fig, use_container_width=True)
+            if turno_g == "Todos" and con_hora:
+                por_turno = Gt.pivot_table(index="turno", columns="tipo", values="movimientos",
+                                           aggfunc="sum", fill_value=0)
+                por_turno["total"] = por_turno.sum(axis=1)
+                por_turno["pct_no_dirigido"] = por_turno.get("No dirigido", 0) / por_turno["total"] * 100
+                st.markdown("##### Por turno")
+                tabla(por_turno.reset_index(), column_config={
+                    "turno": "Turno", "pct_no_dirigido": st.column_config.ProgressColumn(
+                        "% no dirigido", format="%.0f%%", min_value=0, max_value=100)})
+            gu = proc.resumen_grua_usuarios(Gt)
+            gu["pct_no_dirigido"] = gu["pct_no_dirigido"] * 100
+            usr = gu["usuario"].fillna("").str.strip().str.upper()
+            es_gruero = usr.isin([u.upper() for u in getattr(cfg, "GRUEROS", [])])
+            es_superv = usr.isin([u.upper() for u in getattr(cfg, "SUPERVISORES", [])])
+            conf_g = {"usuario": "Usuario", "nombre": "Nombre", "total": "Total",
+                      "pct_no_dirigido": st.column_config.ProgressColumn(
+                          "% no dirigido", format="%.0f%%", min_value=0, max_value=100)}
+
+            def tabla_rol(col, titulo, df):
+                with col:
+                    st.markdown(f"##### {titulo}")
+                    if df.empty:
+                        st.caption("Sin movimientos en el período y turno elegidos.")
+                        return
+                    tot = df["total"].sum()
+                    nd_rol = df["No dirigido"].sum() if "No dirigido" in df else 0
+                    st.caption(f"{fmt_num(tot)} movimientos · {nd_rol / tot:.0%} no dirigidos")
+                    tabla(df, column_config=conf_g)
+
+            c = st.columns(2)
+            tabla_rol(c[0], "Grueros", gu[es_gruero])
+            tabla_rol(c[1], "Supervisores", gu[es_superv])
+            otros = gu[~es_gruero & ~es_superv]
+            if not otros.empty:
+                with st.expander(f"Otros usuarios ({len(otros)}): no están en GRUEROS ni SUPERVISORES de config.py"):
+                    tabla(otros, column_config=conf_g)
 
 # ================================================================ REPORTES
 with tab_rep:

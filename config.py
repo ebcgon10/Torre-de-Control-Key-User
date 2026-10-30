@@ -52,18 +52,19 @@ PREFIJOS_PALLET_COMPLETO = ["ZT ALMACENAMIENTO"]
 ZONAS_EXCLUIDAS = []
 
 # Clasificación del tiempo entre listas (minutos)
-UMBRAL_ESPERA_MIN = 5    # bajo esto: normal (traslado, tomar la siguiente lista)
-UMBRAL_PAUSA_MIN = 15    # entre espera y pausa: espera; sobre esto: pausa
+# Bajo este umbral el hueco entre listas es traslado normal (tomar la siguiente lista);
+# desde este umbral, todo el hueco fuera de la ventana de colación cuenta como pausa.
+UMBRAL_PAUSA_MIN = 1
 
-# Colación con horario fijo por turno: ventana en que los operarios salen a colación
-# (en TC hay dos grupos: 01:30-02:00 y 02:00-02:30) y minutos que le corresponden a cada uno.
-# El tiempo sin listas dentro de la ventana, hasta esos minutos, se cuenta como colación.
+# Colación con horario fijo por turno. En TC hay dos grupos: 01:30-02:00 y 02:00-02:30,
+# así que la ventana es 01:30-02:30. TODO el tiempo sin listas dentro de la ventana cuenta
+# como colación (Min. colación); el tiempo sin listas fuera de ella cuenta como pausa.
 COLACION_POR_TURNO = {
     "TC": {"ventana": ("01:30", "02:30"), "minutos": 30},
 }
 
-# Solo huecos de al menos estos minutos se consideran salida a colación
-COLACION_BRECHA_MINIMA_MIN = 10
+# Huecos más cortos que esto no se cuentan como colación aunque caigan en la ventana (0 = todos)
+COLACION_BRECHA_MINIMA_MIN = 0
 
 # Turnos sin colación configurada arriba: la pausa más larga de cada operario dentro de
 # este rango se toma como colación.
@@ -81,3 +82,15 @@ DURACION_MIN_LISTA_MIN = 0.5
 UMBRAL_UTILIZACION = 0.50      # operario con menos % de su tiempo en listas
 UMBRAL_NO_DIRIGIDO = 0.50          # % de movimientos de grúa no dirigidos
 UMBRAL_CUMPLIMIENTO_PALLET = 0.85  # alerta si sale como pallet completo menos de este % de lo esperado
+
+# Usuarios de grúa por rol (para las tablas de movimientos de grúa). Se comparan en mayúsculas.
+# Los usuarios que no estén en ninguna lista aparecen como "Otros usuarios".
+GRUEROS = [
+    "ALPIZAR", "ARENESPICA", "CARIVE", "DANASTU", "GRUEE_1", "GRUEE_2", "GRUEE_3", "GRUEE_4",
+    "HECZEPP", "HEFRZEPEFL", "JCASTILLOM", "JORIVE", "JORODIAZRO", "LBARRIAB", "LUALMIRAAR",
+    "RAEMBRIZAV", "ROANRIOSGO",
+]
+SUPERVISORES = [
+    "BABBOTT", "CACORTES", "DRODRIGUES", "ECORTESG", "FARUIZ", "FMAYO", "LESCOBAR", "JIGOMEZ",
+    "MALBASINI", "NAYA.CORTES.A", "PROTUNNO", "RORAPATICA",
+]

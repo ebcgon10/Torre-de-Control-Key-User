@@ -488,8 +488,12 @@ def preparar_grua(df: pd.DataFrame) -> pd.DataFrame:
     d["fecha"] = fecha
     d["tiene_hora"] = minutos.notna()
     d["fecha_hora"] = fecha + pd.to_timedelta(minutos.fillna(0), unit="m")
-    # Con hora: turno según config.TURNOS. Sin hora: "Sin hora"
-    turno, _ = asignar_turno(d["fecha_hora"])
+    # Con hora: turno según config.TURNOS. Sin hora: "Sin hora".
+    # La hora del exporte marca el cierre del tramo: 8.0 es el final del TC y 16.0 el final del TA,
+    # así que una hora justo en el límite va al turno que termina (0.0-8.0 TC, 8.5-16.0 TA,
+    # 16.5-23.5 TB). Para eso el turno se asigna con un minuto menos (0.0 queda en 00:00, TC).
+    ajuste = pd.to_timedelta(np.where(minutos.fillna(0) > 0, 1, 0), unit="m")
+    turno, _ = asignar_turno(d["fecha_hora"] - ajuste)
     d["turno"] = np.where(d["tiene_hora"], turno, "Sin hora")
     d["movimientos"] = pd.to_numeric(d["movimientos"], errors="coerce").fillna(0)
     op = d["codigo_de_operacion"].fillna("").str.lower()

@@ -54,7 +54,7 @@ ZONAS_EXCLUIDAS = []
 # Clasificación del tiempo entre listas (minutos)
 # Bajo este umbral el hueco entre listas es traslado normal (tomar la siguiente lista);
 # desde este umbral, todo el hueco fuera de la ventana de colación cuenta como pausa.
-UMBRAL_PAUSA_MIN = 5
+UMBRAL_PAUSA_MIN = 1
 
 # Colación con horario fijo por turno. En TC hay dos grupos: 01:30-02:00 y 02:00-02:30,
 # así que la ventana es 01:30-02:30. TODO el tiempo sin listas dentro de la ventana cuenta

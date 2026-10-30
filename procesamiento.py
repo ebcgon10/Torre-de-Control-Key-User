@@ -431,7 +431,9 @@ def resumen_zonas(listas, brechas, col_cajas="cajas"):
 
 # Columnas donde puede venir la hora del movimiento si no viene junto a la fecha
 COLS_HORA_GRUA = ["hora_de_transaccion", "hora_transaccion", "hora"]
-FORMATOS_FECHA_GRUA = ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y"]
+FORMATOS_FECHA_GRUA = ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y",
+                       "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y",
+                       "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]
 
 
 def _fecha_hora(texto: pd.Series) -> pd.Series:
@@ -445,22 +447,49 @@ def _fecha_hora(texto: pd.Series) -> pd.Series:
     return res
 
 
+def _hora_a_minutos(hora: pd.Series) -> pd.Series:
+    """Minutos desde medianoche a partir de la columna de hora del exporte.
+
+    Acepta hh:mm[:ss], la hora como número (0.0 = 00:00, 13.0 = 13:00, 13.5 = 13:30)
+    o la fracción de día de Excel (0.5 = 12:00) si todos los valores están entre 0 y 1 y
+    alguno tiene decimales. Devuelve NaN si no se puede leer.
+    """
+    h = hora.fillna("").astype(str).str.strip()
+    res = pd.Series(np.nan, index=h.index)
+    con_dos_puntos = h.str.contains(":")
+    if con_dos_puntos.any():
+        partes = h[con_dos_puntos].str.split(":", expand=True)
+        hh = pd.to_numeric(partes[0], errors="coerce")
+        mm = pd.to_numeric(partes[1], errors="coerce") if partes.shape[1] > 1 else 0
+        res[con_dos_puntos] = hh * 60 + mm
+    num = pd.to_numeric(h[~con_dos_puntos].str.replace(",", ".", regex=False), errors="coerce")
+    validos = num.dropna()
+    es_fraccion = len(validos) and validos.between(0, 1).all() and (validos % 1 != 0).any()
+    res[~con_dos_puntos] = num * 1440 if es_fraccion else num * 60
+    return res.where(res.between(0, 1439.99))
+
+
 def preparar_grua(df: pd.DataFrame) -> pd.DataFrame:
     _validar_columnas(df, COLS_GRUA, "movimientos de grúa")
     d = df.copy()
     texto = d["fecha_de_transaccion"].fillna("").str.strip()
-    # Si el exporte trae la hora en otra columna, se junta con la fecha
     col_hora = next((c for c in COLS_HORA_GRUA if c in d.columns), None)
     if col_hora:
-        texto = (texto.str.split(" ").str[0] + " " + d[col_hora].fillna("").str.strip()).str.strip()
-    fecha_hora = _fecha_hora(texto)
-    d = d[fecha_hora.notna()].copy()
-    fecha_hora = fecha_hora[d.index]
-    d["fecha_hora"] = fecha_hora
-    d["fecha"] = fecha_hora.dt.normalize()
-    # Con hora: turno según config.TURNOS. Sin hora (exporte solo con fecha): "Sin hora"
-    d["tiene_hora"] = texto[d.index].str.contains(":")
-    turno, _ = asignar_turno(fecha_hora)
+        # La hora viene en su propia columna: la fecha se toma sin hora y se le suman los minutos
+        fecha = _fecha_hora(texto.str.split(" ").str[0]).dt.normalize()
+        minutos = _hora_a_minutos(d[col_hora])
+    else:
+        fecha = _fecha_hora(texto)
+        minutos = pd.Series(np.where(texto.str.contains(":"),
+                                     fecha.dt.hour * 60 + fecha.dt.minute, np.nan), index=d.index)
+        fecha = fecha.dt.normalize()
+    d = d[fecha.notna()].copy()
+    fecha, minutos = fecha[d.index], minutos[d.index]
+    d["fecha"] = fecha
+    d["tiene_hora"] = minutos.notna()
+    d["fecha_hora"] = fecha + pd.to_timedelta(minutos.fillna(0), unit="m")
+    # Con hora: turno según config.TURNOS. Sin hora: "Sin hora"
+    turno, _ = asignar_turno(d["fecha_hora"])
     d["turno"] = np.where(d["tiene_hora"], turno, "Sin hora")
     d["movimientos"] = pd.to_numeric(d["movimientos"], errors="coerce").fillna(0)
     op = d["codigo_de_operacion"].fillna("").str.lower()

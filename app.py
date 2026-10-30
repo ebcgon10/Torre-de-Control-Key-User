@@ -555,8 +555,31 @@ with tab_res:
                         "% no dirigido", format="%.0f%%", min_value=0, max_value=100)})
             gu = proc.resumen_grua_usuarios(Gt)
             gu["pct_no_dirigido"] = gu["pct_no_dirigido"] * 100
-            tabla(gu, column_config={"pct_no_dirigido": st.column_config.ProgressColumn(
-                "% no dirigido", format="%.0f%%", min_value=0, max_value=100)})
+            usr = gu["usuario"].fillna("").str.strip().str.upper()
+            es_gruero = usr.isin([u.upper() for u in getattr(cfg, "GRUEROS", [])])
+            es_superv = usr.isin([u.upper() for u in getattr(cfg, "SUPERVISORES", [])])
+            conf_g = {"usuario": "Usuario", "nombre": "Nombre", "total": "Total",
+                      "pct_no_dirigido": st.column_config.ProgressColumn(
+                          "% no dirigido", format="%.0f%%", min_value=0, max_value=100)}
+
+            def tabla_rol(col, titulo, df):
+                with col:
+                    st.markdown(f"##### {titulo}")
+                    if df.empty:
+                        st.caption("Sin movimientos en el período y turno elegidos.")
+                        return
+                    tot = df["total"].sum()
+                    nd_rol = df["No dirigido"].sum() if "No dirigido" in df else 0
+                    st.caption(f"{fmt_num(tot)} movimientos · {nd_rol / tot:.0%} no dirigidos")
+                    tabla(df, column_config=conf_g)
+
+            c = st.columns(2)
+            tabla_rol(c[0], "Grueros", gu[es_gruero])
+            tabla_rol(c[1], "Supervisores", gu[es_superv])
+            otros = gu[~es_gruero & ~es_superv]
+            if not otros.empty:
+                with st.expander(f"Otros usuarios ({len(otros)}): no están en GRUEROS ni SUPERVISORES de config.py"):
+                    tabla(otros, column_config=conf_g)
 
 # ================================================================ REPORTES
 with tab_rep:

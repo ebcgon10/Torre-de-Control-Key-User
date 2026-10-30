@@ -82,3 +82,15 @@ DURACION_MIN_LISTA_MIN = 0.5
 UMBRAL_UTILIZACION = 0.50      # operario con menos % de su tiempo en listas
 UMBRAL_NO_DIRIGIDO = 0.50          # % de movimientos de grúa no dirigidos
 UMBRAL_CUMPLIMIENTO_PALLET = 0.85  # alerta si sale como pallet completo menos de este % de lo esperado
+
+# Usuarios de grúa por rol (para las tablas de movimientos de grúa). Se comparan en mayúsculas.
+# Los usuarios que no estén en ninguna lista aparecen como "Otros usuarios".
+GRUEROS = [
+    "ALPIZAR", "ARENESPICA", "CARIVE", "DANASTU", "GRUEE_1", "GRUEE_2", "GRUEE_3", "GRUEE_4",
+    "HECZEPP", "HEFRZEPEFL", "JCASTILLOM", "JORIVE", "JORODIAZRO", "LBARRIAB", "LUALMIRAAR",
+    "RAEMBRIZAV", "ROANRIOSGO",
+]
+SUPERVISORES = [
+    "BABBOTT", "CACORTES", "DRODRIGUES", "ECORTESG", "FARUIZ", "FMAYO", "LESCOBAR", "JIGOMEZ",
+    "MALBASINI", "NAYA.CORTES.A", "PROTUNNO", "RORAPATICA",
+]

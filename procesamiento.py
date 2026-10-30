@@ -230,11 +230,6 @@ def surtido_casi_pallet(lpns: pd.DataFrame) -> pd.DataFrame:
     return z[z["lpns_casi_pallet"] > 0].sort_values("cajas_casi_pallet", ascending=False)
 
 
-def _clasificar(minutos: pd.Series) -> np.ndarray:
-    return np.select([minutos < cfg.UMBRAL_ESPERA_MIN, minutos < cfg.UMBRAL_PAUSA_MIN],
-                     ["Normal", "Espera"], default="Pausa")
-
-
 def _ventana_colacion(b: pd.DataFrame, turno: str):
     """Inicio y fin (datetime) de la ventana de colación del turno, para cada brecha."""
     ini, fin = cfg.COLACION_POR_TURNO[turno]["ventana"]
@@ -247,12 +242,13 @@ def _ventana_colacion(b: pd.DataFrame, turno: str):
 def calcular_brechas(listas: pd.DataFrame) -> pd.DataFrame:
     """Tiempo entre el fin de una lista y el inicio de la siguiente, por operario y turno.
 
-    En turnos con colación configurada (config.COLACION_POR_TURNO), la parte de cada brecha que
-    cae dentro de la ventana de colación se marca como Colación, hasta los minutos que le
-    corresponden a cada operario; el resto de esa brecha se clasifica como Normal, Espera o
-    Pausa según lo que dure. Una brecha puede quedar partida en dos filas.
-    En turnos sin colación configurada, la pausa más larga entre COLACION_MIN_MIN y
-    COLACION_MAX_MIN se toma como colación.
+    Una fila por hueco, con su duración total (brecha_min) separada en:
+      - min_colacion: parte del hueco dentro de la ventana de colación del turno
+        (config.COLACION_POR_TURNO). Todo el tiempo sin listas en la ventana es colación.
+      - min_pausa: parte del hueco fuera de la ventana, si el hueco dura al menos
+        config.UMBRAL_PAUSA_MIN (bajo eso es traslado normal y va a min_normal).
+    En turnos sin colación configurada, la pausa más larga de cada operario entre
+    COLACION_MIN_MIN y COLACION_MAX_MIN se toma como colación.
     """
     d = listas.sort_values(CLAVE_OPERARIO + ["inicio"]).copy()
     d["fin_anterior"] = d.groupby(CLAVE_OPERARIO)["termino"].shift()
@@ -260,9 +256,10 @@ def calcular_brechas(listas: pd.DataFrame) -> pd.DataFrame:
     b["brecha_min"] = (b["inicio"] - b["fin_anterior"]).dt.total_seconds() / 60
     b["solapada"] = b["brecha_min"] < 0
     b["brecha_min"] = b["brecha_min"].clip(lower=0)
-    b["colacion_min"] = 0.0
+    b["min_colacion"] = 0.0
+    b["inicio_colacion"] = pd.NaT
 
-    for turno, conf in cfg.COLACION_POR_TURNO.items():
+    for turno in cfg.COLACION_POR_TURNO:
         m = b["turno"] == turno
         if not m.any():
             continue
@@ -270,40 +267,52 @@ def calcular_brechas(listas: pd.DataFrame) -> pd.DataFrame:
         desde = np.maximum(b.loc[m, "fin_anterior"], v_ini)
         hasta = np.minimum(b.loc[m, "inicio"], v_fin)
         traslape = ((hasta - desde).dt.total_seconds() / 60).clip(lower=0)
-        # Huecos cortos (traslados normales) no cuentan como colación aunque caigan en la ventana
         traslape = traslape.where(b.loc[m, "brecha_min"] >= cfg.COLACION_BRECHA_MINIMA_MIN, 0)
-        # Cada operario tiene derecho a conf["minutos"] de colación dentro de la ventana
-        previo = traslape.groupby([b.loc[m, c] for c in CLAVE_OPERARIO]).cumsum() - traslape
-        b.loc[m, "colacion_min"] = np.minimum(traslape, (conf["minutos"] - previo).clip(lower=0))
+        b.loc[m, "min_colacion"] = traslape
+        b.loc[m, "inicio_colacion"] = desde.where(traslape > 0)
 
-    b["resto_min"] = b["brecha_min"] - b["colacion_min"]
-    b["tipo"] = _clasificar(b["resto_min"])
+    resto = b["brecha_min"] - b["min_colacion"]
+    es_pausa = b["brecha_min"] >= cfg.UMBRAL_PAUSA_MIN
+    b["min_pausa"] = np.where(es_pausa, resto, 0.0)
+    b["min_normal"] = np.where(es_pausa, 0.0, resto)
 
-    col = b[b["colacion_min"] > 0].copy()
-    col["brecha_min"], col["tipo"], col["solapada"] = col["colacion_min"], "Colación", False
-    resto = b[(b["colacion_min"] == 0) | (b["resto_min"] > 0)].copy()
-    resto["brecha_min"] = resto["resto_min"]
-    b = pd.concat([resto, col])
-
+    # Turnos sin ventana configurada: la pausa más larga en el rango pasa a colación
     sin_conf = ~b["turno"].isin(list(cfg.COLACION_POR_TURNO))
-    cand = b[sin_conf & (b["tipo"] == "Pausa")
-             & b["brecha_min"].between(cfg.COLACION_MIN_MIN, cfg.COLACION_MAX_MIN)]
+    cand = b[sin_conf & b["min_pausa"].between(cfg.COLACION_MIN_MIN, cfg.COLACION_MAX_MIN)]
     if len(cand):
-        b.loc[cand.groupby(CLAVE_OPERARIO)["brecha_min"].idxmax(), "tipo"] = "Colación"
+        idx = cand.groupby(CLAVE_OPERARIO)["min_pausa"].idxmax()
+        b.loc[idx, "min_colacion"] = b.loc[idx, "min_pausa"]
+        b.loc[idx, "inicio_colacion"] = b.loc[idx, "fin_anterior"]
+        b.loc[idx, "min_pausa"] = 0.0
 
+    tiene_col, tiene_pau = b["min_colacion"] > 0, b["min_pausa"] > 0
+    b["tipo"] = np.select([tiene_col & tiene_pau, tiene_col, tiene_pau],
+                          ["Colación + pausa", "Colación", "Pausa"], default="Normal")
     b["hora"] = b["fin_anterior"].dt.hour
     b = b.sort_values(CLAVE_OPERARIO + ["fin_anterior"]).reset_index(drop=True)
     return b[CLAVE_OPERARIO + ["nombre", "zona", "id_de_lista", "fin_anterior", "inicio",
-                               "brecha_min", "tipo", "solapada", "hora"]]
+                               "brecha_min", "min_colacion", "min_pausa", "min_normal",
+                               "inicio_colacion", "tipo", "solapada", "hora"]]
+
+
+def brechas_por_tipo(brechas: pd.DataFrame) -> pd.DataFrame:
+    """Formato largo (una fila por hueco y tipo de minuto) para gráficos y totales.
+    La colación se asigna a la hora en que empezó dentro de la ventana."""
+    partes = []
+    for col, tipo in (("min_normal", "Normal"), ("min_pausa", "Pausa"), ("min_colacion", "Colación")):
+        p = brechas[brechas[col] > 0].copy()
+        p["tipo"], p["minutos"] = tipo, p[col]
+        if tipo == "Colación":
+            p["hora"] = p["inicio_colacion"].dt.hour
+        partes.append(p[CLAVE_OPERARIO + ["zona", "hora", "tipo", "minutos"]])
+    return pd.concat(partes, ignore_index=True)
 
 
 def _minutos_por_tipo(brechas, claves):
+    cols = ["min_normal", "min_pausa", "min_colacion"]
     if brechas.empty:
-        return pd.DataFrame(columns=claves)
-    p = brechas.pivot_table(index=claves, columns="tipo", values="brecha_min",
-                            aggfunc="sum", fill_value=0)
-    p.columns = [f"min_{c.lower().replace('ó', 'o')}" for c in p.columns]
-    return p.reset_index()
+        return pd.DataFrame(columns=claves + cols)
+    return brechas.groupby(claves)[cols].sum().reset_index()
 
 
 def _asegurar_columnas(df, columnas):
@@ -313,7 +322,7 @@ def _asegurar_columnas(df, columnas):
     return df
 
 
-TIPOS_MIN = ["min_normal", "min_espera", "min_pausa", "min_colacion"]
+TIPOS_MIN = ["min_normal", "min_pausa", "min_colacion"]
 
 
 def _por_tipo(listas, claves):
@@ -364,7 +373,7 @@ def consolidar_operarios(op):
         listas_manual=("listas_manual", "sum"), cajas_manual=("cajas_manual", "sum"),
         listas_pallet=("listas_pallet", "sum"), cajas_pallet=("cajas_pallet", "sum"),
         min_manual=("min_manual", "sum"), min_efectivos=("min_efectivos", "sum"),
-        min_disponibles=("min_disponibles", "sum"), min_espera=("min_espera", "sum"),
+        min_disponibles=("min_disponibles", "sum"), min_colacion=("min_colacion", "sum"),
         min_pausa=("min_pausa", "sum"), min_inicio_tardio=("min_inicio_tardio", "mean"),
         horas_turno=("horas_turno", "sum"),
     ).reset_index()
@@ -408,9 +417,9 @@ def resumen_zonas(listas, brechas, col_cajas="cajas"):
         listas=("id_de_lista", "size"), cajas=(col_cajas, "sum"), lineas=("lineas", "sum"),
         lpns=("lpns", "sum"), min_efectivos=("dur_ef_min", "sum"), min_por_lista=("dur_min", "mean"),
     ).reset_index()
-    # La espera antes de una lista se atribuye a la zona de esa lista
-    esp = brechas[brechas["tipo"].isin(["Espera", "Pausa"])].groupby("zona")["brecha_min"].sum()
-    z["min_espera_antes"] = z["zona"].map(esp).fillna(0)
+    # La pausa antes de una lista se atribuye a la zona de esa lista (sin colación)
+    pau = brechas.groupby("zona")["min_pausa"].sum()
+    z["min_pausa_antes"] = z["zona"].map(pau).fillna(0)
     z["cj_h_efectiva"] = z["cajas"] / (z["min_efectivos"] / 60)
     z["cajas_por_lista"] = z["cajas"] / z["listas"]
     z["cajas_por_linea"] = np.where(z["lineas"] > 0, z["cajas"] / z["lineas"], np.nan)
@@ -420,11 +429,39 @@ def resumen_zonas(listas, brechas, col_cajas="cajas"):
 
 # ---------------------------------------------------------------- grúa
 
+# Columnas donde puede venir la hora del movimiento si no viene junto a la fecha
+COLS_HORA_GRUA = ["hora_de_transaccion", "hora_transaccion", "hora"]
+FORMATOS_FECHA_GRUA = ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y"]
+
+
+def _fecha_hora(texto: pd.Series) -> pd.Series:
+    """Fecha con hora si la trae (dd/mm/aaaa hh:mm[:ss]); si no, solo la fecha."""
+    res = pd.Series(pd.NaT, index=texto.index, dtype="datetime64[ns]")
+    for fmt in FORMATOS_FECHA_GRUA:
+        falta = res.isna()
+        if not falta.any():
+            break
+        res[falta] = pd.to_datetime(texto[falta], format=fmt, errors="coerce")
+    return res
+
+
 def preparar_grua(df: pd.DataFrame) -> pd.DataFrame:
     _validar_columnas(df, COLS_GRUA, "movimientos de grúa")
     d = df.copy()
-    d["fecha"] = pd.to_datetime(d["fecha_de_transaccion"].str.strip(), format="%d/%m/%Y", errors="coerce")
-    d = d[d["fecha"].notna()].copy()
+    texto = d["fecha_de_transaccion"].fillna("").str.strip()
+    # Si el exporte trae la hora en otra columna, se junta con la fecha
+    col_hora = next((c for c in COLS_HORA_GRUA if c in d.columns), None)
+    if col_hora:
+        texto = (texto.str.split(" ").str[0] + " " + d[col_hora].fillna("").str.strip()).str.strip()
+    fecha_hora = _fecha_hora(texto)
+    d = d[fecha_hora.notna()].copy()
+    fecha_hora = fecha_hora[d.index]
+    d["fecha_hora"] = fecha_hora
+    d["fecha"] = fecha_hora.dt.normalize()
+    # Con hora: turno según config.TURNOS. Sin hora (exporte solo con fecha): "Sin hora"
+    d["tiene_hora"] = texto[d.index].str.contains(":")
+    turno, _ = asignar_turno(fecha_hora)
+    d["turno"] = np.where(d["tiene_hora"], turno, "Sin hora")
     d["movimientos"] = pd.to_numeric(d["movimientos"], errors="coerce").fillna(0)
     op = d["codigo_de_operacion"].fillna("").str.lower()
     act = d["codigo_de_actividad"].fillna("").str.lower()
@@ -475,13 +512,13 @@ def generar_alertas(turnos, operarios, zonas, grua_semanal=None):
         if pct_ef < 0.6:
             alertas.append(("warning", f"Solo el {pct_ef:.0%} de las horas-hombre de picking manual se usan dentro de listas."))
 
-    esperas = turnos["min_espera"].sum() + turnos["min_pausa"].sum()
-    if esperas > 0:
-        alertas.append(("warning", f"{esperas / 60:.1f} horas-hombre en esperas y pausas entre listas (sin contar colación)."))
+    pausas = turnos["min_pausa"].sum()
+    if pausas > 0:
+        alertas.append(("warning", f"{pausas / 60:.1f} horas-hombre en pausas entre listas durante la operación (sin contar colación)."))
 
     bajo = zonas[zonas["cj_h_efectiva"] < cfg.META_ICEO]
     for _, z in bajo.iterrows():
-        alertas.append(("error", f"{z['zona']} rinde {z['cj_h_efectiva']:.0f} cj/h en tiempo efectivo: bajo la meta incluso sin contar esperas."))
+        alertas.append(("error", f"{z['zona']} rinde {z['cj_h_efectiva']:.0f} cj/h en tiempo efectivo: bajo la meta incluso sin contar pausas."))
 
     bajos = operarios[operarios["utilizacion"] < cfg.UMBRAL_UTILIZACION]
     if len(bajos):

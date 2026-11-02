@@ -702,10 +702,16 @@ with tab_rep:
 
 # ================================================================ PIZARRA TPM
 with tab_piz:
-    piz = proc.pizarra_diaria(turnos, Lp)
+    tp = cfg.TURNO_PIZARRA
+    turnos_piz = turnos[turnos["turno"] == tp]
+    Lp_piz = Lp[Lp["turno"] == tp] if Lp is not None else None
+    if turnos_piz.empty:
+        st.warning(f"No hay datos del turno {tp} en el período elegido.")
+        st.stop()
+    piz = proc.pizarra_diaria(turnos_piz, Lp_piz)
     un_dia = desde == hasta
-    st.subheader(f"Pizarra TPM · {periodo}")
-    st.caption(f"Turno {', '.join(cfg.TURNOS_ANALIZADOS)}. Usa el mismo filtro de fecha operativa de la barra lateral."
+    st.subheader(f"Pizarra TPM · Turno {tp} · {periodo}")
+    st.caption(f"Solo turno {tp}. Usa el mismo filtro de fecha operativa de la barra lateral."
                + ("" if un_dia else " Las tarjetas muestran el total del período; la tabla de abajo, cada día."))
 
     # Totales del período (si es un día, son los del día)

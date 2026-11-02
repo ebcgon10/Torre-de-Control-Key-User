@@ -8,6 +8,8 @@ META_ICEO = 240
 META_TIEMPO_EN_LISTAS = 0.55
 META_PALLET_COMPLETO = None   # fijar tras una semana de medición
 META_CASI_PALLET = 0.0        # lo ideal: nada armado como pallet desde surtido
+# La pizarra TPM usa EXCLUSIVAMENTE este turno, aunque TURNOS_ANALIZADOS tenga más.
+TURNO_PIZARRA = "TC"
 
 # Turnos: (nombre, hora inicio, hora fin). Un turno que cruza medianoche
 # (ej. 22:00 a 06:00) se asigna a la fecha del día en que empezó.

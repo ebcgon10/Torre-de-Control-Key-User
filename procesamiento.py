@@ -214,6 +214,38 @@ def preparar_lpns(df: pd.DataFrame):
     return d[["fecha_op", "turno", "zona", "id_de_lista", "lpn", "nivel", "cajas", "lineas"]].reset_index(drop=True)
 
 
+def pizarra_diaria(turnos: pd.DataFrame, lpns: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Indicadores por fecha operativa para la pizarra TPM.
+
+    Reparte el total de cajas (manual + pallet completo) en tres partes que suman 100%:
+    picking real, pallet completo y casi pallet (LPN de surtido de un artículo con
+    UMBRAL_LPN_CASI_PALLET cajas o más, que salió 'completo' pero armado desde el picking)."""
+    d = turnos.groupby("fecha_op").agg(
+        operarios=("operarios_manual", "sum"), listas=("listas_manual", "sum"),
+        cajas_manual=("cajas_manual", "sum"), cajas_pallet=("cajas_pallet", "sum"),
+        horas_hombre=("horas_hombre", "sum"), min_manual=("min_manual", "sum"))
+    d["cajas_casi"] = 0.0
+    d["lpns_casi"] = 0
+    if lpns is not None and not lpns.empty:
+        s = lpns[(lpns["nivel"] == "S") & (lpns["lineas"] <= 1)
+                 & (lpns["cajas"] >= cfg.UMBRAL_LPN_CASI_PALLET)]
+        g = s.groupby("fecha_op").agg(cajas_casi=("cajas", "sum"), lpns_casi=("lpn", "size"))
+        d["cajas_casi"] = g["cajas_casi"].reindex(d.index).fillna(0)
+        d["lpns_casi"] = g["lpns_casi"].reindex(d.index).fillna(0).astype(int)
+    d["cajas_casi"] = np.minimum(d["cajas_casi"], d["cajas_manual"])
+    d["horas_en_listas"] = d["min_manual"] / 60
+    d["cj_hh_total"] = np.where(d["horas_hombre"] > 0, d["cajas_manual"] / d["horas_hombre"], np.nan)
+    d["cj_hh_efectiva"] = np.where(d["horas_en_listas"] > 0,
+                                   d["cajas_manual"] / d["horas_en_listas"], np.nan)
+    d["pct_en_listas"] = np.where(d["horas_hombre"] > 0, d["horas_en_listas"] / d["horas_hombre"], np.nan)
+    total = d["cajas_manual"] + d["cajas_pallet"]
+    d["cajas_total"] = total
+    d["pct_picking"] = np.where(total > 0, (d["cajas_manual"] - d["cajas_casi"]) / total, np.nan)
+    d["pct_pallet"] = np.where(total > 0, d["cajas_pallet"] / total, np.nan)
+    d["pct_casi"] = np.where(total > 0, d["cajas_casi"] / total, np.nan)
+    return d.reset_index().sort_values("fecha_op")
+
+
 def surtido_casi_pallet(lpns: pd.DataFrame) -> pd.DataFrame:
     """LPN de surtido (S) de un solo artículo y muchas cajas: pallets armados desde la posición
     de picking en vez de salir completos desde almacenamiento."""

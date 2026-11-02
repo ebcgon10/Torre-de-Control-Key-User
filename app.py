@@ -293,7 +293,7 @@ if excl_total:
     alertas.append(("warning", "Calidad de datos",
                     f"{excl_total} registros excluidos del archivo de picking (ver detalle en Calidad de datos)."))
 
-tab_res, tab_rep = st.tabs(["Resumen", f"Reportes ({len(alertas)} alertas)"])
+tab_res, tab_rep, tab_piz = st.tabs(["Resumen", f"Reportes ({len(alertas)} alertas)", "Pizarra TPM"])
 
 # ================================================================ RESUMEN
 with tab_res:
@@ -699,3 +699,77 @@ with tab_rep:
         if n_sol:
             st.warning(f"{n_sol} veces un operario inició una lista antes de terminar la anterior. "
                        "Se contaron como 0 minutos entre listas.")
+
+# ================================================================ PIZARRA TPM
+with tab_piz:
+    piz = proc.pizarra_diaria(turnos, Lp)
+    un_dia = desde == hasta
+    st.subheader(f"Pizarra TPM · {periodo}")
+    st.caption(f"Turno {', '.join(cfg.TURNOS_ANALIZADOS)}. Usa el mismo filtro de fecha operativa de la barra lateral."
+               + ("" if un_dia else " Las tarjetas muestran el total del período; la tabla de abajo, cada día."))
+
+    # Totales del período (si es un día, son los del día)
+    t = piz[["cajas_manual", "cajas_pallet", "cajas_casi", "lpns_casi", "horas_hombre", "horas_en_listas",
+             "listas"]].sum()
+    cj_total = t["cajas_manual"] / t["horas_hombre"] if t["horas_hombre"] else 0
+    cj_ef = t["cajas_manual"] / t["horas_en_listas"] if t["horas_en_listas"] else 0
+    en_listas = t["horas_en_listas"] / t["horas_hombre"] if t["horas_hombre"] else 0
+    tot = t["cajas_manual"] + t["cajas_pallet"]
+    p_pick = (t["cajas_manual"] - t["cajas_casi"]) / tot if tot else 0
+    p_pal = t["cajas_pallet"] / tot if tot else 0
+    p_casi = t["cajas_casi"] / tot if tot else 0
+
+    def vs_meta_pct(valor, meta):
+        return None if meta is None else f"{(valor - meta) * 100:+.1f} pts vs meta {meta:.0%}"
+
+    st.markdown("##### 1 · Rendimiento picking")
+    c = st.columns(3)
+    c[0].metric("cj/HH tiempo total (azul)", fmt_num(cj_total),
+                f"{fmt_num(cj_total - cfg.META_ICEO)} vs meta {cfg.META_ICEO}")
+    c[1].metric("cj/HH tiempo efectivo (naranjo)", fmt_num(cj_ef))
+    c[2].metric("Meta ICEO (rojo)", fmt_num(cfg.META_ICEO))
+
+    st.markdown("##### 2 · % Tiempo en listas")
+    c = st.columns(3)
+    c[0].metric("% tiempo en listas", f"{en_listas:.0%}", vs_meta_pct(en_listas, cfg.META_TIEMPO_EN_LISTAS))
+    c[1].metric("Horas en listas", f"{fmt_num(t['horas_en_listas'], 1)} h",
+                f"de {fmt_num(t['horas_hombre'], 1)} HH del turno", delta_color="off")
+    c[2].metric("Meta", f"{cfg.META_TIEMPO_EN_LISTAS:.0%}" if cfg.META_TIEMPO_EN_LISTAS is not None else "-")
+
+    st.markdown("##### 3 · Cómo salieron las cajas (suma 100%)")
+    c = st.columns(3)
+    c[0].metric("% Picking", f"{p_pick:.1%}", f"{fmt_num(t['cajas_manual'] - t['cajas_casi'])} cajas",
+                delta_color="off")
+    c[1].metric("% Pallet completo", f"{p_pal:.1%}",
+                vs_meta_pct(p_pal, cfg.META_PALLET_COMPLETO) or f"{fmt_num(t['cajas_pallet'])} cajas",
+                delta_color="normal" if cfg.META_PALLET_COMPLETO is not None else "off")
+    c[2].metric("% Casi pallet (desde picking)", f"{p_casi:.1%}",
+                f"{fmt_num(t['cajas_casi'])} cajas en {int(t['lpns_casi'])} LPN", delta_color="off")
+    st.caption(f"Total {fmt_num(tot)} cajas. Casi pallet: LPN de surtido de un solo artículo con "
+               f"{cfg.UMBRAL_LPN_CASI_PALLET} cajas o más (debió salir como pallet completo). "
+               f"Meta casi pallet: {cfg.META_CASI_PALLET:.0%}. Meta pallet completo: "
+               + (f"{cfg.META_PALLET_COMPLETO:.0%}." if cfg.META_PALLET_COMPLETO is not None
+                  else "por definir (config.META_PALLET_COMPLETO)."))
+    if Lp is None:
+        st.info("El archivo de picking no trae nivel_lpn: el % casi pallet queda en 0.")
+
+    st.divider()
+    st.markdown("#### Por día" + (" (para rellenar el mes)" if not un_dia else ""))
+    vista = piz.copy()
+    for col in ("pct_en_listas", "pct_picking", "pct_pallet", "pct_casi"):
+        vista[col] = vista[col] * 100
+    tabla(vista[["fecha_op", "cj_hh_total", "cj_hh_efectiva", "pct_en_listas", "horas_en_listas", "horas_hombre",
+                 "pct_picking", "pct_pallet", "pct_casi", "cajas_total", "listas", "operarios"]],
+          column_config={
+              "fecha_op": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+              "cj_hh_total": st.column_config.NumberColumn("cj/HH total", format="%.0f"),
+              "cj_hh_efectiva": st.column_config.NumberColumn("cj/HH efectiva", format="%.0f"),
+              "pct_en_listas": st.column_config.NumberColumn("% en listas", format="%.0f%%"),
+              "horas_en_listas": st.column_config.NumberColumn("Horas en listas", format="%.1f"),
+              "horas_hombre": st.column_config.NumberColumn("HH turno", format="%.1f"),
+              "pct_picking": st.column_config.NumberColumn("% Picking", format="%.1f%%"),
+              "pct_pallet": st.column_config.NumberColumn("% Pallet completo", format="%.1f%%"),
+              "pct_casi": st.column_config.NumberColumn("% Casi pallet", format="%.1f%%"),
+              "cajas_total": st.column_config.NumberColumn("Cajas total", format="%.0f"),
+              "listas": "Listas", "operarios": "Operarios",
+          })

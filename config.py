@@ -3,6 +3,12 @@
 # Meta de productividad sobre tiempo total (cajas por hora-hombre)
 META_ICEO = 240
 
+# Metas de la pestaña Pizarra TPM (fracciones: 0.55 = 55%). None = sin meta definida.
+# Tiempo en listas: con ~460 cj/HH efectiva se necesita sobre 52% del tiempo en listas para llegar a 240.
+META_TIEMPO_EN_LISTAS = 0.55
+META_PALLET_COMPLETO = None   # fijar tras una semana de medición
+META_CASI_PALLET = 0.0        # lo ideal: nada armado como pallet desde surtido
+
 # Turnos: (nombre, hora inicio, hora fin). Un turno que cruza medianoche
 # (ej. 22:00 a 06:00) se asigna a la fecha del día en que empezó.
 TURNOS = [

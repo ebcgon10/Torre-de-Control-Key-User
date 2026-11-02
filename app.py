@@ -738,8 +738,13 @@ with tab_piz:
     st.markdown("##### 2 · % Tiempo en listas")
     c = st.columns(3)
     c[0].metric("% tiempo en listas", f"{en_listas:.0%}", vs_meta_pct(en_listas, cfg.META_TIEMPO_EN_LISTAS))
-    c[1].metric("Horas en listas", f"{fmt_num(t['horas_en_listas'], 1)} h",
-                f"de {fmt_num(t['horas_hombre'], 1)} HH del turno", delta_color="off")
+    n_op = piz["operarios"].sum()
+    c[1].metric("Horas en listas por operario (promedio)",
+                f"{fmt_num(t['horas_en_listas'] / n_op, 1)} h" if n_op else "-",
+                f"de {fmt_num(t['horas_hombre'] / n_op, 1)} h de picking cada uno" if n_op else None,
+                delta_color="off",
+                help=f"Suma de todos los operarios: {fmt_num(t['horas_en_listas'], 1)} h en listas de "
+                     f"{fmt_num(t['horas_hombre'], 1)} horas-hombre ({int(n_op)} operarios × ventana de picking).")
     c[2].metric("Meta", f"{cfg.META_TIEMPO_EN_LISTAS:.0%}" if cfg.META_TIEMPO_EN_LISTAS is not None else "-")
 
     st.markdown("##### 3 · Cómo salieron las cajas (suma 100%)")
